@@ -85,22 +85,9 @@ issue comment
 
 ## 内部机制
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor 人
-    participant GH as GitHub
-    participant SA as superagent
-    participant W as Worker
-    人->>GH: 创建 issue 并 @agent
-    GH-->>SA: trigger
-    SA->>SA: 评估请求，建立 ticket
-    Note over SA,W: 每个 ticket 独立会话与目录
-    SA->>W: 派发任务
-    W->>GH: 推送分支，打开 PR
-    W-->>GH: 在原 issue 回复结果
-    SA-->>人: 面板显示待处理事项
-```
+<p align="center">
+  <img src="assets/mechanism.svg" alt="内部机制时序图：人在 GitHub 创建 issue，trigger 进入 superagent，建立 ticket 后派发给 worker，worker 开 PR 并回复 issue" width="100%">
+</p>
 
 几个关键设计：
 
@@ -127,8 +114,9 @@ sequenceDiagram
 .
 ├── README.md
 └── assets/
-    ├── banner.svg   # 顶部横幅（CSS 动画）
-    └── flow.gif     # 四步流程动画
+    ├── banner.svg     # 顶部横幅（CSS 动画）
+    ├── flow.gif       # 四步流程动画
+    └── mechanism.svg  # 内部机制时序图
 ```
 
 ## 常见问题
