@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="bannerTitle bannerDesc">
+  <title id="bannerTitle">super agent 探索</title>
+  <desc id="bannerDesc">深色横幅：SUPER AGENT 探索，围绕 agent 的 issue、trigger、ticket、PR 四个环节缓慢旋转。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#070c18"/>
+      <stop offset="0.55" stop-color="#0c1428"/>
+      <stop offset="1" stop-color="#070c18"/>
+    </linearGradient>
+    <linearGradient id="titleGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#67e8f9"/>
+      <stop offset="0.48" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#f472b6"/>
+    </linearGradient>
+    <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="0.5" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#f472b6"/>
+    </linearGradient>
+    <radialGradient id="coreGlow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#6366f1" stop-opacity="0.55"/>
+      <stop offset="0.6" stop-color="#6366f1" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#6366f1" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="leftGlow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#ffffff" stroke-opacity="0.035"/>
+    </pattern>
+    <filter id="dotGlow" x="-300%" y="-300%" width="700%" height="700%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <clipPath id="round">
+      <rect width="1200" height="360" rx="24"/>
+    </clipPath>
+    <style>
+      .spin-a, .spin-b, .spin-c, .float, .pulse, .ripple { transform-box: view-box; }
+      .spin-a { transform-origin: 925px 180px; animation: spin 46s linear infinite; }
+      .spin-b { transform-origin: 925px 180px; animation: spin 34s linear infinite reverse; }
+      .spin-c { transform-origin: 925px 180px; animation: spin 24s linear infinite; }
+      .float { animation: float 6s ease-in-out infinite; }
+      .pulse { animation: pulse 4.5s ease-in-out infinite; }
+      .ripple { transform-origin: 925px 180px; animation: ripple 4.5s ease-out infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+      @keyframes pulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+      @keyframes ripple {
+        0% { transform: scale(1); opacity: 0.5; }
+        70%, 100% { transform: scale(1.9); opacity: 0; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .spin-a, .spin-b, .spin-c, .float, .pulse, .ripple { animation: none; }
+      }
+    </style>
+  </defs>
+
+  <g clip-path="url(#round)">
+    <rect width="1200" height="360" fill="url(#bg)"/>
+    <rect width="1200" height="360" fill="url(#grid)"/>
+    <ellipse cx="180" cy="30" rx="380" ry="240" fill="url(#leftGlow)"/>
+    <ellipse cx="1020" cy="330" rx="320" ry="220" fill="url(#leftGlow)" opacity="0.5"/>
+
+    <!-- 左侧文案 -->
+    <g>
+      <rect x="72" y="52" width="262" height="32" rx="16" fill="#22d3ee" fill-opacity="0.08" stroke="#22d3ee" stroke-opacity="0.35"/>
+      <circle cx="90" cy="68" r="3.5" fill="#22d3ee" class="pulse"/>
+      <text x="102" y="73" font-family="'SF Pro Text','Helvetica Neue',Arial,sans-serif" font-size="13" fill="#a5f3fc" letter-spacing="0.4">dsh-superagent · GitHub 自动化</text>
+
+      <text x="70" y="176" font-family="'SF Pro Display','Helvetica Neue',Arial,sans-serif" font-size="68" font-weight="800" letter-spacing="1.5" fill="url(#titleGrad)">SUPER AGENT</text>
+
+      <text x="72" y="234" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Microsoft YaHei',sans-serif" font-size="40" font-weight="700" letter-spacing="10" fill="#e6edf7">探索</text>
+      <rect x="212" y="219" width="258" height="2" rx="1" fill="url(#ringGrad)" opacity="0.6"/>
+
+      <text x="72" y="278" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Microsoft YaHei',sans-serif" font-size="18" fill="#9fb0d0">在 issue 里 @ 它，剩下的交给 trigger。</text>
+
+      <text x="72" y="314" font-family="'SF Mono',Menlo,Consolas,monospace" font-size="12" fill="#6b7f9e" letter-spacing="1">issue → trigger → ticket → worktree → PR</text>
+    </g>
+
+    <!-- 右侧轨道 -->
+    <g>
+      <ellipse cx="925" cy="180" rx="210" ry="165" fill="url(#coreGlow)"/>
+
+      <circle cx="925" cy="180" r="150" fill="none" stroke="#8b9dc3" stroke-opacity="0.18" stroke-dasharray="3 9"/>
+      <circle cx="925" cy="180" r="112" fill="none" stroke="#8b9dc3" stroke-opacity="0.14" stroke-dasharray="2 7"/>
+      <circle cx="925" cy="180" r="74" fill="none" stroke="#8b9dc3" stroke-opacity="0.12"/>
+
+      <g class="spin-a">
+        <circle cx="925" cy="30" r="4" fill="#22d3ee" filter="url(#dotGlow)"/>
+      </g>
+      <g class="spin-b">
+        <circle cx="925" cy="68" r="3.5" fill="#a78bfa" filter="url(#dotGlow)"/>
+      </g>
+      <g class="spin-c">
+        <circle cx="925" cy="106" r="3" fill="#f472b6" filter="url(#dotGlow)"/>
+      </g>
+
+      <circle cx="925" cy="180" r="54" fill="none" stroke="url(#ringGrad)" stroke-width="1.5" class="ripple"/>
+      <circle cx="925" cy="180" r="54" fill="#0a1020" stroke="url(#ringGrad)" stroke-width="1.5"/>
+      <circle cx="925" cy="180" r="46" fill="none" stroke="#ffffff" stroke-opacity="0.06"/>
+      <text x="925" y="176" text-anchor="middle" font-family="'SF Pro Display','Helvetica Neue',Arial,sans-serif" font-size="18" font-weight="700" fill="#e6edf7">agent</text>
+      <text x="925" y="196" text-anchor="middle" font-family="'SF Mono',Menlo,Consolas,monospace" font-size="10" fill="#7c8db0" letter-spacing="1">dsh</text>
+
+      <!-- 四个卫星标签 -->
+      <g class="float" style="animation-delay: -0.4s">
+        <rect x="774" y="60" width="90" height="28" rx="14" fill="#0b1224" stroke="#22d3ee" stroke-opacity="0.35"/>
+        <text x="819" y="78" text-anchor="middle" font-family="'SF Mono',Menlo,Consolas,monospace" font-size="11.5" fill="#cbd5e1"><tspan fill="#67e8f9" font-weight="700">01</tspan> issue</text>
+      </g>
+      <g class="float" style="animation-delay: -1.6s">
+        <rect x="986" y="60" width="96" height="28" rx="14" fill="#0b1224" stroke="#a78bfa" stroke-opacity="0.35"/>
+        <text x="1034" y="78" text-anchor="middle" font-family="'SF Mono',Menlo,Consolas,monospace" font-size="11.5" fill="#cbd5e1"><tspan fill="#c4b5fd" font-weight="700">02</tspan> trigger</text>
+      </g>
+      <g class="float" style="animation-delay: -2.8s">
+        <rect x="986" y="272" width="96" height="28" rx="14" fill="#0b1224" stroke="#f472b6" stroke-opacity="0.35"/>
+        <text x="1034" y="290" text-anchor="middle" font-family="'SF Mono',Menlo,Consolas,monospace" font-size="11.5" fill="#cbd5e1"><tspan fill="#f9a8d4" font-weight="700">03</tspan> ticket</text>
+      </g>
+      <g class="float" style="animation-delay: -4s">
+        <rect x="792" y="272" width="66" height="28" rx="14" fill="#0b1224" stroke="#34d399" stroke-opacity="0.35"/>
+        <text x="825" y="290" text-anchor="middle" font-family="'SF Mono',Menlo,Consolas,monospace" font-size="11.5" fill="#cbd5e1"><tspan fill="#6ee7b7" font-weight="700">04</tspan> PR</text>
+      </g>
+    </g>
+
+    <!-- 边角点缀 -->
+    <g fill="#67e8f9" opacity="0.5">
+      <path d="M1118 44h12M1124 38v12" stroke="#67e8f9" stroke-width="1.2"/>
+      <path d="M64 330h10M69 325v10" stroke="#a78bfa" stroke-width="1.2"/>
+    </g>
+  </g>
+
+  <rect x="0.5" y="0.5" width="1199" height="359" rx="23.5" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
+</svg>
