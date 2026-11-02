@@ -130,6 +130,13 @@ issue comment
 **支持飞书吗？**
 dsh-superagent 支持 GitHub 与飞书两种 Source；这个沙盒目前只接了 GitHub。
 
+## 相关：DeepSeek Harness 源码教程
+
+仓库里附了一套面向初学者的 **DeepSeek Harness 源码深度教程**（21 章静态网页，含交互图示），从 Claude Code / Codex 这类 agent harness 切入，逐层讲到 Cordis 插件框架、Agent 循环、事件溯源会话、工具流水线、上下文压缩与多智能体编排，并附带 372 个包的完整全景。
+
+- 入口：[`deepseek-harness-tutorial/index.html`](deepseek-harness-tutorial/index.html)（双击即可打开）
+- 说明：[`deepseek-harness-tutorial/README.md`](deepseek-harness-tutorial/README.md)
+
 ## 参考
 
 - [dsh-superagent](https://github.com/deepseek-ai/dsh-superagent-prototype)：设计与实现

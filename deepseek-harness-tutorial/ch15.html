@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 15 章 · 人在环路 · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch15">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 15 章 · 第五部 外围与治理</span>
+        <h1>人在环路：审批、计划、目标与任务</h1>
+        <p class="ch-lead">一个能自己动手的智能体，必须随时可以被人类叫停、纠正、授权。DSH 把「人」也设计成了系统里的一等公民：审批、权限预设、计划模式、提问、目标、定时提醒、后台任务——它们共同构成「human-in-the-loop」的外围治理层。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会明白</div>
+          <ul>
+            <li>审批（approval）为什么必须 fail-closed，<code>ask</code> / <code>never</code> 两种策略的区别；</li>
+            <li>权限预设、计划模式、<code>ask_user_question</code> 各自的定位；</li>
+            <li>目标（goal）如何跨轮次持续，Goal Round 与 activation 的含义；</li>
+            <li>定时提醒（schedule）、后台任务（jobs）、待办（todo）、交付物（deliverables）。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：家长签字、请假条、许愿清单、闹钟</div>
+          <ul style="margin:6px 0 0">
+            <li><b>审批</b>：动危险东西前要家长签字，没人签就<b>不许动</b>（fail-closed）。</li>
+            <li><b>权限预设</b>：家长先定好「今天允许做什么」的档位。</li>
+            <li><b>计划模式</b>：先交一份计划书给家长审，批了才开工。</li>
+            <li><b>提问</b>：遇到不会的，举手问老师（<code>ask_user_question</code>）。</li>
+            <li><b>目标</b>：本子上写着「这学期要考 100 分」，跨很多天才完成。</li>
+            <li><b>闹钟</b>：到点提醒你（schedule）；<b>后台任务</b>：一边烧水一边写作业（jobs）。</li>
+          </ul>
+        </div>
+
+        <h2>审批：这个操作能不能继续？</h2>
+        <p><code>ctx.approval</code> 只回答一个问题：「这个具体操作是否可以继续？」它的结果是一个<b>闭合</b>的联合，失败即拒绝：</p>
+        <div class="mini-cards">
+          <div class="mini-card"><div class="mc-t" style="color:var(--green)">allowed-once</div><div class="mc-d">只授权「所询问的那一次」操作</div></div>
+          <div class="mini-card"><div class="mc-t" style="color:var(--rose)">rejected</div><div class="mc-d">明确拒绝</div></div>
+          <div class="mini-card"><div class="mc-t" style="color:var(--amber)">cancelled</div><div class="mc-d">请求被撤回</div></div>
+          <div class="mini-card"><div class="mc-t" style="color:var(--muted)">unavailable</div><div class="mc-d">没有应答者 / 不负责 / 抛异常 → 一律当拒绝</div></div>
+        </div>
+        <p>每个请求都会得到一个全新的 <code>ApprovalRequestId</code>，并配对写入两条<b>仅日志</b>审计事件：<code>approval/asked</code> 与 <code>approval/decided</code>。按会话策略 <code>ApprovalPolicy</code> 决定分发前发生什么：</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>策略</th><th>行为</th><th>场景</th></tr></thead>
+            <tbody>
+              <tr><td><code>ask</code>（默认）</td><td>委托给组合的应答者链；没有应答者则 fail-closed 为 <code>unavailable</code></td><td>交互式使用</td></tr>
+              <tr><td><code>never</code></td><td>永不问人，每次询问确定性地返回 <code>rejected</code></td><td>CI、无人值守</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="box warn">
+          <div class="box-title">⚠️ fail-closed 的意义</div>
+          <p>缺失、不负责、抛异常或不合规的应答者，都产生 <code>unavailable</code>，而<b>不是放行</b>。调用方（tools、tool-bash）只接受 <code>allowed-once</code>，其余一律拒绝。这正是「宁可挡住，也不误放」。</p>
+        </div>
+
+        <h2>权限预设与计划模式</h2>
+        <div class="two-col">
+          <div class="box insight" style="margin:0">
+            <div class="box-title">🎚️ 权限预设 <code>permission-presets</code></div>
+            <p class="small">一组具名的「权限档位」（<code>PresetSpec</code>/<code>PresetOption</code>），派生出一个 <code>custom</code> 状态。切换记录为仅日志的 <code>permission/preset</code> 事件。UI 上体现为「新会话默认档」与当前会话的 <code>/permission</code> 弹窗。</p>
+          </div>
+          <div class="box tip" style="margin:0">
+            <div class="box-title">📋 计划模式 <code>ctx.planMode</code></div>
+            <p class="small">只记日志的 <code>plan/mode</code> 状态；在 <code>agent/pre-step</code> 追加/冲刷待定选择；提供 <code>exit_plan_mode</code> 工具与 <code>/plan</code> 命令，形成「先出计划、经审阅再退出计划模式」的闭环。</p>
+          </div>
+        </div>
+        <p>计划模式和权限预设经常一起用：<b>先 plan（只读探索、产出计划）→ 人审 → 退出 plan 并提升权限 → 真正执行</b>。这就是「先看图纸再动工」。</p>
+
+        <h2>提问：ask_user_question</h2>
+        <p>模型遇到歧义时，可以调用 <code>ask_user_question</code> 工具，向 UI 发起一个人工问答请求（<code>AskUserQuestionRequest</code>，带选项、多选、描述）。这是 <b>UI 支持的人工问答 seam</b>：没有 UI 应答者时，它按约定的错误分类处理，而不是卡死。</p>
+
+        <h2>目标：跨轮次的「许愿清单」</h2>
+        <p>Goal 是附着在现有会话上的<b>单个持久完成目标</b>，带按修订号演进的阶段：</p>
+        <div class="diagram">
+          <div class="flow">
+            <div class="node teal">active<small>进行中</small></div>
+            <span class="arrow">⇄</span>
+            <div class="node amber">paused<small>暂停</small></div>
+            <span class="arrow">⇄</span>
+            <div class="node rose">blocked<small>因问题停止（带 code + 说明）</small></div>
+            <span class="arrow">→</span>
+            <div class="node green">complete<small>完成</small></div>
+          </div>
+          <div class="diagram-caption">每次获准的持久变更都会递增 revision；状态存在 <code>goal/change</code> 会话事件里，日志仍是真源。</div>
+        </div>
+        <p>关键概念是 <b>Goal Round</b>：为当前目标接纳的一次续行周期，具体化为一个由目标触发的轮次（可含零到多个步骤）。同一会话里<b>无关的人类轮次不消耗 Goal Round 上限</b>。</p>
+        <div class="box insight">
+          <div class="box-title">💡 activation：进程本地、不参与回放</div>
+          <p>目标还有一种进程本地的激活态 <code>armed</code> / <code>disarmed</code>，<b>有意不参与持久回放</b>。因此恢复或 fork 之后，自动工作<b>不会</b>自己开始——必须由人再授权一次（<code>/goal</code> 或模型工具）才会 re-arm。这是一个安全阀。</p>
+        </div>
+
+        <h2>定时提醒、后台任务、待办、交付物</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>子系统</th><th>是什么</th><th>关键点</th></tr></thead>
+            <tbody>
+              <tr><td><code>schedule</code></td><td>Host 拥有的持久提醒，可投递到现有或新会话</td><td>到点触发一条唤醒消息；支持一次 / 周期</td></tr>
+              <tr><td><code>jobs</code></td><td>后台任务运行时（如长跑的 bash）</td><td><code>JobId</code> 品牌化；<code>job/registered</code> + <code>job/settled</code>；<code>job_*</code> 工具读/停；输出环</td></tr>
+              <tr><td><code>todo</code></td><td>面向模型的 <code>todo_write</code> 工具</td><td>整列表条目；持久事件所有权 + 投影；UI 上就是待办清单</td></tr>
+              <tr><td><code>deliverables</code></td><td>一轮交给用户的东西</td><td><code>present</code> 声明的 <code>PresentedFile</code> + 由 git 快照得出的 <code>WorkspaceChangesSummary</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="box tip">
+          <div class="box-title">🔔 一个常见组合</div>
+          <p>「先 schedule 一个明早 9 点的提醒 → 到点唤醒会话 → agent 用 jobs 起一个长跑测试 → 用 todo 记录进度 → 最后用 present 把改了哪些文件交付给你」。这些子系统各管一段，但都挂在同一条会话日志上，所以随时可回放、可审计。</p>
+        </div>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>docs/subsystems/approval.zh.md</code> · <code>permission-presets.zh.md</code> · <code>plan.zh.md</code> · <code>user-questions.zh.md</code></li>
+            <li><code>docs/subsystems/goal.zh.md</code> · <code>schedule.zh.md</code> · <code>jobs.zh.md</code> · <code>todo.zh.md</code> · <code>deliverables.zh.md</code></li>
+            <li><code>packages/interaction/*</code> · <code>packages/goal/*</code> · <code>packages/schedule/*</code> · <code>packages/jobs/*</code> · <code>packages/todo/*</code> · <code>packages/deliverables/*</code></li>
+          </ul>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">审批的应答者「不存在 / 抛异常」时，结果是什么？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>默认放行</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span><code>unavailable</code>，调用方按拒绝处理（fail-closed）</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>无限等待</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>自动切换成 never 策略</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>缺失/不负责/抛异常都产生 unavailable，调用方只接受 allowed-once，其余都当拒绝。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">目标（goal）的 activation 为什么有意不参与持久回放？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>为了省磁盘</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>作为安全阀：恢复/fork 后自动工作不会自己开始，必须由人再次授权</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>因为它总是 true</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>因为它属于另一个 agent</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>activation 是进程本地状态；恢复后自动续跑需要一次经人类授权的 re-arm，避免「睡一觉醒来它自己干活」。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

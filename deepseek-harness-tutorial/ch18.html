@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 18 章 · 模块全景图 · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+<style>
+.atlas-tools{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:18px 0}
+.atlas-tools input{flex:1;min-width:200px;padding:10px 14px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--ink);font-family:inherit;font-size:14px}
+.atlas-tools select{padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--ink);font-family:inherit;font-size:14px}
+.group-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px;margin:16px 0}
+.group-chip{display:flex;flex-direction:column;gap:2px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--card);cursor:pointer;transition:.15s;font-size:12px}
+.group-chip:hover{border-color:var(--brand);transform:translateY(-1px)}
+.group-chip.active{background:var(--brand-soft);border-color:var(--brand)}
+.group-chip .gn{font-weight:800;font-size:13px;font-family:var(--mono)}
+.group-chip .gc{color:var(--muted);font-size:11px}
+.pkg-list{display:flex;flex-direction:column;gap:6px;margin-top:14px}
+.pkg-row{display:grid;grid-template-columns:1fr auto;gap:10px;padding:9px 13px;border-radius:9px;border:1px solid var(--line-2);background:var(--card)}
+.pkg-row:hover{border-color:var(--line);background:var(--card-2)}
+.pkg-row .pn{font-weight:800;font-size:13px;font-family:var(--mono);color:var(--brand-ink)}
+html[data-theme="dark"] .pkg-row .pn{color:var(--brand)}
+.pkg-row .pd{font-size:12px;color:var(--ink-3);margin-top:2px;line-height:1.5}
+.pkg-row .pm{text-align:right;font-size:11px;color:var(--muted);white-space:nowrap}
+.pkg-row .pm b{color:var(--ink-2)}
+.pkg-row .grp{display:inline-block;font-size:10px;font-weight:800;padding:1px 6px;border-radius:5px;background:var(--bg-2);color:var(--ink-3);margin-right:6px}
+</style>
+</head>
+<body data-chapter="ch18">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 18 章 · 第六部 全景与实战</span>
+        <h1>模块全景图：372 个包</h1>
+        <p class="ch-lead">到这里，你已经理解了所有核心机制。这一章把整个仓库摊开：<b>52 个包组、372 个包、约 52.8 万行 TypeScript</b>，每一个都列出职责与体量。你可以按组浏览，也可以搜索。读完它，你就有了一张「DSH 到底由什么组成」的完整地图——<b>不遗漏任何模块</b>。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 怎么用这一页</div>
+          <ul>
+            <li>先点下面的组卡片筛选（比如 <code>core</code>、<code>llm</code>、<code>session</code>），看该组的包；</li>
+            <li>用搜索框找关键词（如 <code>tool</code>、<code>sandbox</code>、<code>ui-</code>）；</li>
+            <li>「行数」代表代码体量，不代表重要度——<code>core</code> 很小但最核心，<code>client</code> 巨大但多为 UI。</li>
+          </ul>
+        </div>
+
+        <div class="kv">
+          <div class="kv-item"><div class="k">包组</div><div class="v" id="statGroups">52 个</div></div>
+          <div class="kv-item"><div class="k">包</div><div class="v" id="statPkgs">372 个</div></div>
+          <div class="kv-item"><div class="k">TypeScript 行数</div><div class="v" id="statLines">—</div></div>
+        </div>
+
+        <div class="box insight">
+          <div class="box-title">🗺️ 先看地图：52 个组</div>
+          <p class="small" style="margin-bottom:10px">点击任意组即可筛选下方清单。<span class="muted">（括号内为包数量 / 大致行数）</span></p>
+          <div class="group-grid" id="groupGrid"></div>
+        </div>
+
+        <div class="atlas-tools">
+          <input id="pkgSearch" type="search" placeholder="搜索包名或职责关键词，例如 tool / sandbox / ui- / llm …">
+          <select id="groupSelect"><option value="">全部组</option></select>
+          <span class="muted small" id="pkgCount"></span>
+        </div>
+        <div class="pkg-list" id="pkgList"></div>
+
+        <h2>按体量看，谁最「重」？</h2>
+        <div class="bar" style="height:26px">
+          <span class="seg-brand" style="width:33%"></span><span class="seg-teal" style="width:20%"></span><span class="seg-amber" style="width:12%"></span><span class="seg-rose" style="width:9%"></span><span class="seg-muted" style="width:26%"></span>
+        </div>
+        <div class="legend-inline">
+          <span><i style="background:var(--brand);width:10px;height:10px;border-radius:3px;display:inline-block"></i> <b>client</b> 174k 行（浏览器 UI）</span>
+          <span><i style="background:var(--teal);width:10px;height:10px;border-radius:3px;display:inline-block"></i> <b>experimental</b> 107k（评估中）</span>
+          <span><i style="background:var(--amber);width:10px;height:10px;border-radius:3px;display:inline-block"></i> <b>api/session/llm/core</b> 各 15–23k</span>
+          <span><i style="background:var(--rose);width:10px;height:10px;border-radius:3px;display:inline-block"></i> <b>其余核心组</b></span>
+          <span><i style="background:var(--line);width:10px;height:10px;border-radius:3px;display:inline-block"></i> <b>其他 40+ 组</b></span>
+        </div>
+        <p class="small muted" style="margin-top:10px">一个有趣的观察：真正决定「harness 是什么」的 <code>core</code>（14.6k 行）、<code>llm</code>（15k）、<code>session</code>（18.8k）加起来不到 5 万行；而 <code>client</code> 一个组就 17.4 万行。这说明 <b>DSH 把复杂度尽量放在了「可替换的外围」，把内核做得很小</b>——这正是「一切皆插件」的体现代价与收益。</p>
+
+        <h2>怎么记住这 52 个组？</h2>
+        <p>别死记。抓住五条主线即可：</p>
+        <div class="flow-vert" style="max-width:720px">
+          <div class="fv-step"><div class="fv-rail"><div class="fv-dot">1</div><div class="fv-line"></div></div><div class="fv-body"><div class="fv-t">内核主干</div><div class="fv-d">core · session · llm · api · typert · boot · preset · bundle · host</div></div></div>
+          <div class="fv-step"><div class="fv-rail"><div class="fv-dot" style="background:var(--teal)">2</div><div class="fv-line"></div></div><div class="fv-body"><div class="fv-t">能力 seam</div><div class="fv-d">fs · shell · subprocess · sandbox · web · lsp · mcp · skill · workflow · subagent · compaction · storage · attachment · spill · ssh · terminal · ptc-runtime · jobs · schedule · goal · todo · plan · guard · interaction</div></div></div>
+          <div class="fv-step"><div class="fv-rail"><div class="fv-dot" style="background:var(--amber)">3</div><div class="fv-line"></div></div><div class="fv-body"><div class="fv-t">外围与治理</div><div class="fv-d">settings · credentials · feedback · identity · telemetry · deliverables · document · workspace · session-query</div></div></div>
+          <div class="fv-step"><div class="fv-rail"><div class="fv-dot" style="background:var(--violet)">4</div><div class="fv-line"></div></div><div class="fv-body"><div class="fv-t">界面与多端</div><div class="fv-d">client · host · sdk · acp · extensions · context</div></div></div>
+          <div class="fv-step"><div class="fv-rail"><div class="fv-dot" style="background:var(--rose)">5</div><div class="fv-line"></div></div><div class="fv-body"><div class="fv-t">底座与实验</div><div class="fv-d">util · test-support · experimental · bundle · computer-use · browser-use</div></div></div>
+        </div>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>packages/README.zh.md</code> —— 每个组职责的权威映射（本章组描述主要依据）</li>
+            <li><code>docs/module-graph.zh.md</code> —— 372 包的 peer 依赖关系图</li>
+            <li><code>docs/subsystems/README.zh.md</code> —— 每个子系统的参考页索引</li>
+          </ul>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">哪个包组的 TypeScript 代码量最大？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>core</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>client（浏览器 UI）</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>llm</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>session</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>client 约 174k 行，远超其他组。但它多是 UI 呈现；真正决定 harness 行为的 core/llm/session 加起来还不到 5 万行。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+<script>
+(function () {
+  var GROUP_DESC = {
+    client: "Web GUI 浏览器半侧：shell、协议层、对象服务、slot、ui-* 插件",
+    experimental: "仍在评估、不承诺产品支持的能力（Agent Teams、liveshare、inspector、claude-code-mods 等）",
+    extensions: "agent 运行时自我修改：动态 Cordis 插件 / 服务检查 / 挂载卸载",
+    api: "Remote BFF 装配与 Typert RPC 网关",
+    session: "持久会话数据平面：持久化 seam + 后端、投影、标题、遥测",
+    llm: "模型能力族：抽象服务 + 适配器 + token 计量 + 重试",
+    core: "产品 API 主干：会话、提示词、工具、agent 服务与具体循环",
+    boot: "启动粘合层 + profile / 插件管理 / 市场 / HMR",
+    "test-support": "测试基础设施（会话快照、LLM 回放、客户端测试运行时）",
+    typert: "类型图生成、产物加载与运行时注册表",
+    subagent: "委派 agent 的提供方注册表与面向模型的工具",
+    util: "零依赖工具库",
+    fs: "文件系统能力：seam、本地实现、文件工具、搜索工具",
+    subprocess: "子进程能力：Service Definition + 本地进程树",
+    "session-query": "会话检索：逻辑语料、有界读取、血缘、SQLite 全文搜索",
+    shell: "bash 能力：执行器 seam、本地/沙箱实现、工具",
+    context: "模型可见请求上下文：workspace 指令、时间、引用",
+    host: "Web GUI 宿主服务、目录选择、启动、插件清单、产品遥测",
+    schedule: "Host 拥有的定时后续操作",
+    web: "Web 访问能力：搜索 / 抓取 seam、提供方、工具",
+    sandbox: "进程限制 seam；bwrap / Landlock / Seatbelt / ACL 后端",
+    credentials: "凭据引用与记录 seam、授权流程",
+    "ptc-runtime": "PTC 执行能力族：定义 + 沙箱 Node 提供方 + Consumer",
+    sdk: "进程外 SDK：JSON-RPC 协议与 TS 客户端 / 服务器",
+    interaction: "人机协作平面：审批 / 交互 seam、权限预设、命令、询问用户",
+    compaction: "压缩能力族：定义 + 基础提供方 + 命令",
+    skill: "skill 能力族：注册表、本地提供方、目录 / loader",
+    storage: "非会话存储中枢 + 后端 + 领域形式",
+    goal: "同会话 goal 的持久化与生命周期",
+    jobs: "后台任务运行时与作业控制工具",
+    lsp: "LSP 导航 seam + 通用 stdio 提供方 + 工具",
+    workflow: "工作流 seam、PTC 进程引擎、workflow 工具",
+    attachment: "持久附件标识、校验、内容寻址存储",
+    ssh: "POSIX 远端连接及配套 fs / 子进程 / 沙箱提供方",
+    terminal: "持久 PTY 服务：限定所有者范围的会话与本地 shell 后端",
+    acp: "仅面向自动化的 ACP（Agent Client Protocol）服务器",
+    bundle: "可安装的 profile patch 层（base / web / headless / sdk / acp / sdk-minimal）",
+    deliverables: "轮次交付物：显式文件交付 + 记录的工作区改动",
+    mcp: "把外部 MCP 服务器工具接入为原生工具",
+    workspace: "Workspace 实体注册表",
+    spill: "输出溢出存储 seam + 本地实现 + 结果 spill 策略",
+    preset: "由 preset cordis.yml 按会话组装 agent",
+    settings: "用户设置 seam + 基于文件的提供方",
+    feedback: "人类反馈的采集与命令",
+    document: "共享宿主 Office 到 PDF 转换",
+    plan: "Plan 协作状态，提供直接进入命令与经评审的退出",
+    telemetry: "共享 Cordis OTel 上报通道",
+    guard: "循环卫生守卫：重复调用提醒 + tools/execute 截止时间强制执行",
+    todo: "面向模型的 todo_write 工具",
+    identity: "共享匿名身份",
+    "browser-use": "按名称独占注册浏览器操作提供方",
+    "computer-use": "按名称独占注册计算机操作提供方"
+  };
+
+  function fmt(n){ return n>=1000 ? (n/1000).toFixed(1)+"k" : ""+n; }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    var P = window.PACKAGES || [];
+    var byGroup = {};
+    P.forEach(function(p){ byGroup[p.g] = byGroup[p.g] || { n:0, lines:0 }; byGroup[p.g].n++; byGroup[p.g].lines += p.lines; });
+    var groups = Object.keys(byGroup).sort(function(a,b){ return byGroup[b].lines - byGroup[a].lines; });
+
+    var totalLines = P.reduce(function(s,p){ return s+p.lines; }, 0);
+    var el;
+    el = document.getElementById("statGroups"); if (el) el.textContent = groups.length + " 个";
+    el = document.getElementById("statPkgs"); if (el) el.textContent = P.length + " 个";
+    el = document.getElementById("statLines"); if (el) el.textContent = totalLines.toLocaleString() + " 行（src 内 .ts/.tsx）";
+
+    var grid = document.getElementById("groupGrid");
+    var sel = document.getElementById("groupSelect");
+    var list = document.getElementById("pkgList");
+    var search = document.getElementById("pkgSearch");
+    var countEl = document.getElementById("pkgCount");
+    var activeGroup = "";
+
+    groups.forEach(function (g) {
+      var c = document.createElement("div");
+      c.className = "group-chip";
+      c.innerHTML = '<span class="gn">' + g + '</span><span class="gc">' + byGroup[g].n + " 包 · " + fmt(byGroup[g].lines) + " 行</span>";
+      c.addEventListener("click", function () {
+        activeGroup = (activeGroup === g) ? "" : g;
+        sel.value = activeGroup;
+        Array.prototype.forEach.call(grid.children, function (x) { x.classList.remove("active"); });
+        if (activeGroup) c.classList.add("active");
+        render();
+      });
+      grid.appendChild(c);
+      var opt = document.createElement("option"); opt.value = g; opt.textContent = g + "（" + byGroup[g].n + "）"; sel.appendChild(opt);
+    });
+
+    function render() {
+      var q = (search.value || "").trim().toLowerCase();
+      var rows = P.filter(function (p) {
+        if (activeGroup && p.g !== activeGroup) return false;
+        if (!q) return true;
+        return (p.name + " " + p.g + " " + p.desc).toLowerCase().indexOf(q) >= 0;
+      }).sort(function (a, b) { return (a.g === b.g) ? b.lines - a.lines : a.g.localeCompare(b.g); });
+      countEl.textContent = "共 " + rows.length + " 个包" + (activeGroup ? "（组：" + activeGroup + "）" : "");
+      var html = "";
+      rows.slice(0, 400).forEach(function (p) {
+        html += '<div class="pkg-row"><div><div class="pn"><span class="grp">' + p.g + '</span>' + p.name + '</div><div class="pd">' + (p.desc || "—") + '</div></div><div class="pm"><b>' + fmt(p.lines) + '</b> 行<br>' + p.files + ' 文件</div></div>';
+      });
+      if (!rows.length) html = '<div class="box warn" style="margin:0"><div class="box-title">没有匹配</div><p>换个关键词或点「全部组」。</p></div>';
+      list.innerHTML = html;
+    }
+    sel.addEventListener("change", function () { activeGroup = sel.value; Array.prototype.forEach.call(grid.children, function (x) { x.classList.remove("active"); }); render(); });
+    search.addEventListener("input", render);
+    render();
+  });
+})();
+</script>
+</body>
+</html>

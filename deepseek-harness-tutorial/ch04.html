@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 4 章 · 全局架构 · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch04">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 4 章 · 第二部 核心引擎</span>
+        <h1>全局架构：一次请求的完整旅程</h1>
+        <p class="ch-lead">前三章我们有了「harness 是身体」「循环是心跳」「一切皆插件」三个直觉。现在把它们合起来：从你在 Web 界面按下发送，到模型回复、工具执行、日志落盘、界面更新——中间到底经过了哪些包、哪些事件？这一章是整张地图。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会明白</div>
+          <ul>
+            <li>仓库目录怎么分（apps / packages / native / docs / vendor / python）；</li>
+            <li>「核心六包」各自负责什么、用什么 <code>ctx</code> 键；</li>
+            <li>三类事件域：会话事件、Agent 事件、能力事件；</li>
+            <li>一次轮次（turn）从头到尾的完整事件流；</li>
+            <li>想加新功能时，应该挂到哪个扩展点。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：一家大公司怎么运转</div>
+          <p>把 DSH 想成一家公司：<b>apps/</b> 是前台门店（Web、桌面、CLI）；<b>packages/</b> 是各个部门（研发、财务、后勤……共 372 个）；<b>native/</b> 是造工具的车间；<b>docs/</b> 是公司手册；<b>vendor/</b> 是外包来的通用制度（Cordis）。你发出的请求，就是一份工单，从门店前台一路流转到各部门，最后带着成果回到你手上。</p>
+        </div>
+
+        <h2>仓库的七个顶层目录</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>目录</th><th>内容</th></tr></thead>
+            <tbody>
+              <tr><td><code>apps/</code></td><td>可运行的壳：<code>cli</code>、<code>desktop</code>（Electron）、<code>desktop-host</code>、<code>web</code>、<code>plugin-market-generator</code></td></tr>
+              <tr><td><code>packages/</code></td><td><b>本体</b>：按能力系列分组的 372 个 <code>@deepseek-ai/dsh-*</code> 包（第 18 章有全景）</td></tr>
+              <tr><td><code>native/</code></td><td>原生插件（<code>@deepseek-ai/node-addon-system</code>）：pty、进程控制等底层能力</td></tr>
+              <tr><td><code>docs/</code></td><td>架构、子系统、cookbook、生成的目录（工具/配置/持久化）</td></tr>
+              <tr><td><code>vendor/</code></td><td>以 vendor 方式引入、被重新 scope 的 Cordis 框架源码</td></tr>
+              <tr><td><code>python/</code></td><td>Python SDK / 运行时（把 dsh CLI 打包成 wheel）</td></tr>
+              <tr><td><code>scripts/</code> / <code>benchmarks/</code></td><td>构建 / 门禁 / 生成脚本，以及性能基准</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2>核心六包：引擎的六个零件</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>包</th><th>职责</th><th><code>ctx</code> 键</th></tr></thead>
+            <tbody>
+              <tr><td><code>core/session</code></td><td>仅追加的 <code>SessionEvent</code> 日志与内存存储——<b>唯一真源</b></td><td><code>ctx.sessions</code></td></tr>
+              <tr><td><code>core/system-prompt</code></td><td>提示词片段与工具 schema 的组装</td><td><code>ctx.systemPrompt</code></td></tr>
+              <tr><td><code>core/tools</code></td><td>作用域化工具注册表 + 受把关的执行流水线</td><td><code>ctx.tools</code></td></tr>
+              <tr><td><code>core/agent</code></td><td><code>Agent</code> 接口、活跃注册表、发起者作用域、<code>agent/*</code> 事件</td><td><code>ctx.agents</code></td></tr>
+              <tr><td><code>core/agent-loop</code></td><td>实现该接口的默认循环驱动器</td><td><code>ctx.agentLoop</code></td></tr>
+              <tr><td><code>llm/llm</code></td><td>消息 / 流式词汇表与适配器 seam</td><td><code>ctx.llm</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>还有一个小而关键的 <code>core/scope</code>——它不是服务，而是一个零依赖库（<code>createScope</code>/<code>scopeTarget</code>），被 session 与 system-prompt 复用，用来实现「按 agent 作用域」的注册。</p>
+        <p>一次轮次，正好按固定路径流过这六个包：<b>agent-loop 认领提示词 → session 开轮次 → system-prompt 组装前缀并派生历史 → llm 流式请求 → tools 分发工具 → 每个事实回写 session 供下一步派生</b>。</p>
+
+        <h2>三类事件：分清楚，才找得到扩展点</h2>
+        <div class="mini-cards">
+          <div class="mini-card" style="border-left:4px solid var(--brand)"><div class="mc-t">📒 会话事件 <span class="pill b">durable</span></div><div class="mc-d"><code>turn/start</code>、<code>user/message</code>、<code>assistant/message</code>、<code>tool/call</code>…… 追加到日志、经 <code>session/event</code> 广播。<b>必须在重载后依然存在的事实用它。</b></div></div>
+          <div class="mini-card" style="border-left:4px solid var(--teal)"><div class="mc-t">⚡ Agent 事件 <span class="pill t">live</span></div><div class="mc-d"><code>agent/*</code>：inbox、步骤、状态、请求、验证、续跑。携带活跃 <code>Agent</code>。<b>要观察或拦截进行中的工作用它。</b></div></div>
+          <div class="mini-card" style="border-left:4px solid var(--violet)"><div class="mc-t">🔌 能力事件 <span class="pill v">policy</span></div><div class="mc-d"><code>fs/*</code>、<code>tools/*</code>、<code>telemetry/*</code>…… 无需 import 循环就能给某个 seam 附加策略或适配器。</div></div>
+        </div>
+
+        <h2>一次轮次的完整事件流</h2>
+        <p>下面是 <code>docs/architecture.zh.md</code>「轮次流程」的逐步展开。它是全书最重要的一张时序，后面每一章都在补它的细节。点「播放」或「下一步」跟着走。</p>
+
+        <div class="seq" data-widget="seq">
+          <div class="seq-head">
+            <span class="st-title">🌀 Turn 的完整生命周期</span>
+            <span class="spacer"></span>
+            <span class="seq-count small muted"></span>
+            <div class="step-btns">
+              <button class="btn" data-act="prev">上一步</button>
+              <button class="btn primary" data-act="play">▶ 播放</button>
+              <button class="btn" data-act="next">下一步</button>
+            </div>
+          </div>
+          <div class="seq-stage">
+            <div class="seq-lifelines">
+              <div class="lifeline">Driver</div><div class="lifeline">Hooks</div><div class="lifeline">Prompt/Tools</div><div class="lifeline">LLM</div><div class="lifeline">Session</div>
+            </div>
+            <div class="seq-rows">
+              <div class="seq-row" data-note="turn/start：在领取任何输入之前打开轮次。"><div class="rt from">Driver</div><div class="msgline"><span class="dashline"></span><span class="msg">turn/start</span><span class="dashline"></span></div><div class="rt to">Session</div></div>
+              <div class="seq-row" data-note="认领下一步输入 + 一条排队消息；快照本次步骤的模型选择；组装提示词段落与「本步准入」的工具 schema。"><div class="rt from">Driver</div><div class="msgline"><span class="dashline"></span><span class="msg">claim → assemble</span><span class="dashline"></span></div><div class="rt to">Prompt/Tools</div></div>
+              <div class="seq-row" data-note="agent/pre-step 瀑布：hook 可以接纳(enter)、改写或拒绝(reject)本步要进入的消息。首次领取被拒或为空 → 关闭一个「没有步骤」的轮次。"><div class="rt from">Driver</div><div class="msgline"><span class="dashline"></span><span class="msg">agent/pre-step</span><span class="dashline"></span></div><div class="rt to">Hooks</div></div>
+              <div class="seq-row" data-note="step/start：开启一个步骤（一次模型请求 + 它引发的工具）。"><div class="rt from">Driver</div><div class="msgline"><span class="dashline"></span><span class="msg">step/start</span><span class="dashline"></span></div><div class="rt to">Session</div></div>
+              <div class="seq-row" data-note="agent/request 瀑布（已弃用的调整钩子）→ prepareCall()：绑定适配器。任一异步阶段取消都不会提交系统提示词或用户消息。"><div class="rt from">Driver</div><div class="msgline"><span class="dashline"></span><span class="msg">agent/request → prepareCall</span><span class="dashline"></span></div><div class="rt to">LLM</div></div>
+              <div class="seq-row" data-note="提交 system/message（第 0 号 surface 节点）与每条 user/message；按需记录 request/header 与 request/context；然后从日志冻结出本次请求。"><div class="rt from">Driver</div><div class="msgline"><span class="dashline"></span><span class="msg">system/message · user/message · request/*</span><span class="dashline"></span></div><div class="rt to">Session</div></div>
+              <div class="seq-row ret" data-note="llm/stream 瀑布 → 模型流式返回 chunk；实时侧经 agent/assistant-stream 推给 UI。"><div class="rt from">LLM</div><div class="msgline"><span class="dashline"></span><span class="msg">StreamChunk*</span><span class="dashline"></span></div><div class="rt to">Driver</div></div>
+              <div class="seq-row" data-note="成功：写 assistant/message（内嵌精确紧凑的带时间 stream）；失败：写 assistant/attempt（不伪造模型历史）。"><div class="rt from">Driver</div><div class="msgline"><span class="dashline"></span><span class="msg">assistant/message 或 attempt</span><span class="dashline"></span></div><div class="rt to">Session</div></div>
+              <div class="seq-row" data-note="按 executionMode 给工具调用分类，进入有界并发池。每个调用先写 tool/call（执行前），经 tools/pre-execute → 守卫 → tools/execute → post-execute，再写 tool/result。"><div class="rt from">Driver</div><div class="msgline"><span class="dashline"></span><span class="msg">tool/call → execute → tool/result</span><span class="dashline"></span></div><div class="rt to">Tools/Session</div></div>
+              <div class="seq-row" data-note="step/end：释放本步工具集。若工具「欠」下一次请求，或有新输入 → 回到认领，开启下一个步骤。"><div class="rt from">Driver</div><div class="msgline"><span class="dashline"></span><span class="msg">step/end → 下一步？</span><span class="dashline"></span></div><div class="rt to">Session</div></div>
+              <div class="seq-row" data-note="自然停止且收件箱为空 → agent/turn-stopping（serial 终止检查点，没有 next()，可直接终止轮次）。"><div class="rt from">Driver</div><div class="msgline"><span class="dashline"></span><span class="msg">agent/turn-stopping</span><span class="dashline"></span></div><div class="rt to">Hooks</div></div>
+              <div class="seq-row" data-note="turn/end：带 TurnEndReason 关闭轮次；agent/status 回到 idle。"><div class="rt from">Driver</div><div class="msgline"><span class="dashline"></span><span class="msg">turn/end · idle</span><span class="dashline"></span></div><div class="rt to">Session</div></div>
+            </div>
+          </div>
+          <div class="seq-note">点击「下一步」或「播放」开始。</div>
+        </div>
+
+        <div class="box insight">
+          <div class="box-title">💡 记住三条主线，后面就不会迷路</div>
+          <ol style="margin:6px 0 0">
+            <li><b>日志是唯一真源</b>：所有事实先写 <code>session</code>，模型历史由 <code>deriveMessages()</code> 从日志算出来。</li>
+            <li><b>事件分为可回放（session/*）与实时（agent/*）</b>：SDK 要 transcript 就读 session/event；要队列与状态就读 agent/*。</li>
+            <li><b>能力都要能被替换</b>：新增能力挂在 seam 上（在 <code>ctx.&lt;key&gt;</code> 注册），不要改循环。</li>
+          </ol>
+        </div>
+
+        <h2>想加新功能？先看这张归属表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>你想…</th><th>机制</th></tr></thead>
+            <tbody>
+              <tr><td>加一个模型提供方</td><td>在 <code>ctx.llm</code> 上注册其适配器</td></tr>
+              <tr><td>加一个面向模型的能力（工具）</td><td>在 <code>ctx.tools</code> 上注册；schema 自动进提示词组装</td></tr>
+              <tr><td>加 shell 执行 / 持久终端</td><td>注册 <code>ctx.shell</code> / <code>ctx.terminals</code> 后端</td></tr>
+              <tr><td>加一条人类命令（<code>/xxx</code>）</td><td>在 <code>ctx.commands</code> 上注册，无需模型轮次即可分派</td></tr>
+              <tr><td>拦截请求 / 工具 / 轮次</td><td>用对应的 <code>agent/*</code> 或 <code>tools/*</code> 事件；<code>agent/turn-stopping</code> 能终止轮次</td></tr>
+              <tr><td>给模型加可见上下文</td><td>调用 <code>agent.inject()</code>，它落到下一次获准的请求里</td></tr>
+              <tr><td>加 UI 或编辑器集成</td><td>驱动 <code>ctx.agents</code>，并从 <code>session/event</code> 渲染</td></tr>
+              <tr><td>新增持久会话状态</td><td>扩展 <code>SessionEventMap</code>，从日志渲染与回放</td></tr>
+              <tr><td>换一种后端存会话</td><td>实现 <code>SessionPersistence</code>（<code>create/open/stat/list/export</code>）</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="small muted">这张表来自 <code>docs/architecture.zh.md</code> 的「新行为的归属位置」。它几乎就是一份「DSH 插件开发索引」。</p>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>docs/architecture.zh.md</code> —— 本章骨架（轮次流程、事件域、核心包、归属表）</li>
+            <li><code>docs/module-graph.zh.md</code> —— 包与包之间的 peer 依赖图（1883 行，全部 372 包）</li>
+            <li><code>docs/agent-lifecycle.zh.md</code> —— 轮次/步骤时序图（Mermaid）</li>
+            <li><code>docs/tool-execution-pipeline.zh.md</code> —— 工具流水线流程图</li>
+          </ul>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">如果某个事实「必须在重新加载后依然存在」，它应该走哪类事件？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>Agent 事件 <code>agent/*</code></span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>会话事件 <code>session/*</code>（追加到日志）</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>能力事件 <code>fs/*</code></span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>随便哪类都行</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>会话事件是持久事实，会追加到日志并可回放；agent/* 是实时协调，进程重启就没了。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">「一个轮次（turn）可以包含零个步骤（step）吗？」</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt" data-correct="1"><span class="k">A</span><span>可以。首次领取被拒或为空时，会关闭一个不含步骤的轮次</span></button>
+              <button class="quiz-opt"><span class="k">B</span><span>不可以，每个轮次至少一个步骤</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>只有出错时才可以</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>只有 Web 端才可以</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：A。</b>文档明确：reject、空输入或 pre-step 失败，可以关闭一个「没有 step」的轮次。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

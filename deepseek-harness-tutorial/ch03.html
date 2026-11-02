@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 3 章 · 组装一台 DSH · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch03">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 3 章 · 第一部 建立直觉</span>
+        <h1>组装一台 DSH：Profile 与组合包</h1>
+        <p class="ch-lead">既然一切皆插件，那「启动 <code>dsh web</code>」到底发生了什么？答案是：它按顺序把好几层「插件清单」叠起来，拼出一棵完整的插件树。理解 <b>Profile（配置档）</b> 与 <b>组合包（Bundle）</b>，你才知道 DSH 是怎么「组装」出来的。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会明白</div>
+          <ul>
+            <li>Profile 与 Bundle 分别是什么，各自在 <code>package.json</code> 里怎么声明；</li>
+            <li>启动时那几层 patch 是按什么顺序叠加的；</li>
+            <li><code>dsh-base</code> 提供了什么，<code>web</code>/<code>headless</code>/<code>sdk</code>/<code>acp</code> 各自加了什么；</li>
+            <li>怎么用 <code>--dump-config</code> 看自己机器上真实的插件树。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：装修套餐 + 改造清单</div>
+          <p>装修公司给你三样东西：</p>
+          <ul style="margin:6px 0 0">
+            <li><b>Profile（配置档）</b>＝你选的「整体套餐」，比如「拎包入住版 web」。它只写着「我要哪几个套餐包、我自己的改造清单在哪」。</li>
+            <li><b>Bundle（组合包）</b>＝一个个「标准包」，比如「水电基础包（dsh-base）」「智能家居包（dsh-web-app）」。每个包本身是一张<b>家具清单</b>。</li>
+            <li><b>patch（补丁/改造清单）</b>＝一张张「把 X 换成 Y、再加一个 Z」的指令。按顺序叠上去，后叠的覆盖先叠的。</li>
+          </ul>
+          <p style="margin-top:8px">最终你看到的房子（运行中的插件树），就是这些清单<b>从空房子开始、一层层叠出来</b>的结果。</p>
+        </div>
+
+        <h2>三个关键词</h2>
+        <div class="kv">
+          <div class="kv-item"><div class="k">Profile</div><div class="v">存放在 Harness home 里的「具名组装」。列出自己叠放的组合包、树外插件，以及用户自己的 <code>cordis.patch.yml</code>。随发行版交付 <code>web</code> / <code>headless</code> / <code>sdk</code> / <code>sdk-minimal</code> / <code>acp</code> 五个模板。</div></div>
+          <div class="kv-item"><div class="k">Bundle</div><div class="v">Cordis 配置项 + 挂载代码的分发格式。它插入的内容始终可以被上层 patch 覆盖。</div></div>
+          <div class="kv-item"><div class="k">patch</div><div class="v">一条按 <code>id</code> 定位的指令：替换某个条目<b>整个</b> config，或插入一个新条目。</div></div>
+        </div>
+
+        <p>它们在各自的 <code>package.json</code> 里用 <code>dsh</code> 字段声明自己：<code>dsh.profile</code> 列出一个 profile 的组合包，<code>dsh.bundle</code> 指向一个组合包的 patch 文件。</p>
+        <div class="code-file">packages/bundle/base/package.json</div>
+<pre data-nohl>{
+  "name": "@deepseek-ai/dsh-base",
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" }
+  }
+}</pre>
+
+        <h2>启动时：五层叠加</h2>
+        <p>运行时，这些层<b>依次应用在一个空条目列表之上</b>（后者覆盖前者）：</p>
+        <div class="diagram" data-widget="layers">
+          <div class="layer-stack">
+            <div class="layer brand">① Profile 中有序的组合包 <small>dsh-base → dsh-web-app</small><span class="tag">bundle</span></div>
+            <div class="layer teal">② 各组合包自己的 cordis.patch.yml <small>每个包自带的家具清单</small><span class="tag">patch</span></div>
+            <div class="layer amber">③ Home patch <small>用户级 cordis.patch.yml</small><span class="tag">patch</span></div>
+            <div class="layer" style="border-color:color-mix(in srgb,var(--violet) 45%,var(--line));background:var(--violet-soft)">④ <code>--patch</code> overlay <small>命令行临时覆盖</small><span class="tag">patch</span></div>
+          </div>
+          <div class="diagram-caption">
+            <button class="btn" data-act="build">▶ 逐层叠加</button>
+            <button class="btn" data-act="next-layer">下一层</button>
+            <button class="btn" data-act="show-all">全部显示</button>
+            <br>从空列表开始，每叠一层，可用的插件就多一批；越靠上优先级越高。
+          </div>
+        </div>
+
+        <div class="box insight">
+          <div class="box-title">💡 「替换整个 config」是关键细节</div>
+          <p>一条 patch 不是「合并进」目标的 config，而是<b>替换它的整个 config</b>。所以当你想改某个插件的一两个字段时，必须把想保留的其它字段也一起写出来。这也是为什么「不同模式专用的插件行」各自重述完整配置——保证任何一行最多只属于一个组合包层加用户层。</p>
+        </div>
+
+        <h2>随发行版交付的组合包</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>组合包</th><th>作用</th></tr></thead>
+            <tbody>
+              <tr><td><code>dsh-base</code></td><td><b>共享第一层</b>：模型适配器、完整工具集、持久化、沙箱与审批策略、设置、凭据、遥测。web / headless / sdk / acp 都基于它。</td></tr>
+              <tr><td><code>dsh-web-app</code></td><td>在 base 之上加浏览器应用：HTTP 服务器、Web 前端、客户端插件、RPC 网关。</td></tr>
+              <tr><td><code>dsh-headless</code></td><td>加一个<b>不带服务器</b>的一次性运行器，跑完一个任务就退出（适合 CI、脚本）。</td></tr>
+              <tr><td><code>dsh-sdk-app</code></td><td>加一个 SDK JSON-RPC 服务器，让外部程序通过 stdio 驱动 DSH。</td></tr>
+              <tr><td><code>dsh-acp-app</code></td><td>加一个仅用于自动化的 ACP（Agent Client Protocol）服务器。</td></tr>
+              <tr><td><code>dsh-sdk-minimal</code></td><td>刻意保留的例外：<b>不应用 base</b>，而是拥有一棵完整、显式的独立 SDK 配置树，用于最小化嵌入。</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p><code>dsh-base</code> 提供的「开箱即用」能力，包括：DeepSeek 模型连接、文件编辑 / shell / web 搜索 / HTTP 抓取 / 子代理 / 任务与目标跟踪等完整工具集、跨重启的持久会话，以及默认权限策略——<b>把文件写入限制在工作区内，危险操作前征询许可</b>。</p>
+
+        <h2>看一眼真实的插件树</h2>
+        <p>不用猜，你可以直接让 DSH 打印它启动时用的配置树：</p>
+        <pre data-nohl>dsh --profile web --dump-config</pre>
+        <p>它打印出的任何条目，都可以被你自己写的 patch 替换。比如在 profile 的 <code>cordis.patch.yml</code> 里加一个条目，就能给所有 agent 多挂一个工具：</p>
+        <div class="code-file">profile 的 cordis.patch.yml —— 插入一个新工具行（示意）</div>
+<pre data-nohl>- insert:
+    - id: tool-str-replace-editor
+      name: '@deepseek-ai/dsh-tool-str-replace-editor'
+      config:
+        maxOutputChars: 16000</pre>
+
+        <div class="box tip">
+          <div class="box-title">🧩 和「一切皆插件」的关系</div>
+          <p>现在你能把第 2、3 章连起来了：<b>Cordis</b> 提供了「插件 + 上下文 + 事件 + effect」这套机制；<b>Profile / Bundle / patch</b> 则是「如何把一堆插件按层次组合成产品」的配置语言。一个是发动机，一个是装配说明书。</p>
+        </div>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>docs/architecture.zh.md</code> —— 「Profile 与组合包」「应用启动」两节（本章主要依据）</li>
+            <li><code>packages/bundle/base/README.zh.md</code> 与 <code>cordis.patch.yml</code> —— base 的完整行集合</li>
+            <li><code>packages/boot/app-boot/</code> —— profile 如何解析、分层与定制</li>
+            <li><code>docs/subsystems/boot.zh.md</code> —— 插件管理器、市场、HMR 的类型与行为</li>
+          </ul>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">关于 patch 的行为，下面哪句是对的？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>它会把新 config 深度合并进目标 config</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>它用新 config <b>整个替换</b>目标的 config</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>它只能新增插件，不能修改已有插件</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>它只在运行时临时生效，不落盘</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>patch 按 id 定位条目并替换整个 config。想保留的字段必须重述，否则会丢失。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q"><code>web</code>、<code>headless</code>、<code>sdk</code>、<code>acp</code> 四个 profile 共享的第一层组合包是？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>dsh-web-app</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>dsh-base</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>dsh-sdk-minimal</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>dsh-plugin-market</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B（dsh-base）。</b>它提供模型访问、工具、持久化与安全默认值；sdk-minimal 是唯一刻意不基于 base 的例外。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

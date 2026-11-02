@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 19 章 · 动手实践 · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch19">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 19 章 · 第六部 全景与实战</span>
+        <h1>动手实践：写插件、用 SDK</h1>
+        <p class="ch-lead">看懂了不等于会。这一章把前 18 章的知识拧成两件可落地的事：<b>给 DSH 加一个工具</b>，以及<b>用 SDK 从外部驱动一个 DSH agent</b>。所有步骤都来自仓库里的 cookbook，代码是示意，但结构和真实做法一致。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会做</div>
+          <ul>
+            <li>从源码把 DSH 跑起来；</li>
+            <li>新增一个工具包，并让它出现在 agent 的工具列表里；</li>
+            <li>用插件注册一个监听器 / 一个 LLM 适配器（知道挂哪）；</li>
+            <li>用 TypeScript / Python SDK 从外部启动并驱动一次运行。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：第一次给机器人装零件</div>
+          <p>你已经看懂了机器人的说明书（前 18 章）。现在动手：<b>先把它装好通电</b>（跑起来），<b>再给它装一个新零件</b>（加工具），<b>最后用遥控器从外面指挥它</b>（用 SDK）。</p>
+        </div>
+
+        <h2>第一步：把 DSH 跑起来</h2>
+        <div class="code-file">README「从源码运行」</div>
+<pre data-nohl>git clone https://github.com/deepseek-ai/deepseek-harness.git
+cd deepseek-harness
+pnpm install
+pnpm run build
+pnpm dsh web            # 默认 http://127.0.0.1:3080，并打开浏览器</pre>
+        <p>或者直接用 npm 安装的版本：</p>
+        <pre data-nohl>npx @deepseek-ai/dsh web</pre>
+        <div class="box tip">
+          <div class="box-title">💡 小提示</div>
+          <p>从源码运行时，<code>pnpm run build</code> 会准备构建产物；<code>pnpm dsh web</code> 直接用这些产物，不会重新构建。开发时可以用 <code>pnpm run dev:web</code>，它会在源码修改时重建 client bundle。</p>
+        </div>
+
+        <h2>第二步：加一个工具</h2>
+        <p>回顾第 8 章：工具 = <code>ToolDefinition</code>，注册到 <code>ctx.tools</code>。下面是一个完整的「查天气」工具插件示意（包名、路径按 DSH 约定）：</p>
+        <div class="code-file">packages/my-tools/weather/src/index.ts（示意）</div>
+<pre data-nohl>import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { Context } from '@deepseek-ai/cordis'
+
+export const inject = ['tools']
+
+export function apply(ctx: Context) {
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'weather',
+    description: 'Get the current weather for a city',
+    parameters: {
+      city: { type: 'string', required: true },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: false,
+        properties: { tempC: { type: 'number' }, sky: { type: 'string' } } },
+      render: (_args, v) => [{ type: 'text', text: `${v.sky}, ${v.tempC}°C` }],
+    },
+    async execute({ city }, exec) {
+      // 真实实现里应使用 ctx.fs / ctx.web 等 seam，并转发 exec.signal
+      return { tempC: 22, sky: 'sunny' }
+    },
+    timeoutMs: 8_000,
+    isConcurrencySafe: () => true,
+  })))
+}</pre>
+        <p>然后把它挂进 profile。最简做法是在你自己的 profile 的 <code>cordis.patch.yml</code> 里加一行：</p>
+        <pre data-nohl>- insert:
+    - id: tool-weather
+      name: '@my/tool-weather'
+      config: {}</pre>
+        <div class="box insight">
+          <div class="box-title">💡 为什么这么简单？</div>
+          <p>因为工具注册是「可逆副作用」：插件 mount 时 <code>register</code> 返回一个 disposer，卸载时自动撤销。<code>schemas()</code> 会自动把它的 schema 加进下一次提示词组装。你<b>不需要</b>改 agent-loop、不需要改内核——这正是第 2、3 章反复强调的。</p>
+        </div>
+
+        <h2>第三步：其它扩展点（挂哪）</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>你想做</th><th>写在哪里</th></tr></thead>
+            <tbody>
+              <tr><td>加一个模型适配器</td><td>实现 <code>LlmAdapter</code>，在 <code>ctx.llm</code> 注册；参考 <code>packages/llm/llm-deepseek</code> 与 cookbook <code>adding-an-llm-adapter</code></td></tr>
+              <tr><td>拦截每次工具调用</td><td><code>ctx.on('tools/pre-execute', async (exec, next) => { ... return next() })</code></td></tr>
+              <tr><td>在每步前注入上下文</td><td><code>agent.inject({ role:'user', content:[...] })</code> 或监听 <code>agent/pre-step</code></td></tr>
+              <tr><td>加一个人类命令</td><td>在 <code>ctx.commands</code> 注册，如 <code>/weather</code></td></tr>
+              <tr><td>加一个设置页</td><td>注册 <code>SettingsNamespace</code> + client 设置卡片（cookbook <code>adding-a-settings-card</code>）</td></tr>
+              <tr><td>新增一种持久事件</td><td>声明合并 <code>SessionEventMap</code>，并从日志渲染与回放</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2>第四步：用 SDK 从外部驱动</h2>
+        <p>如果你不想启动 Web，而是想让自己的程序调用 DSH，用 SDK。TypeScript SDK 会解析同版本的 <code>dsh</code> 依赖并以 <code>sdk</code> profile 启动一个子进程，通过 stdio JSON-RPC 通信：</p>
+        <div class="code-file">TypeScript SDK 用法（示意）</div>
+<pre data-nohl>import { DeepHarness } from '@deepseek-ai/dsh-sdk-client'
+
+const harness = new DeepHarness({ /* cwd, profile 等 */ })
+const session = await harness.startSession({ cwd: process.cwd() })
+
+// 发一条用户消息，流式读取事件
+for await (const ev of session.send('把这个仓库的测试跑一遍')) {
+  if (ev.type === 'assistant/message') console.log(ev.data.message)
+  if (ev.type === 'tool/call') console.log('调用工具', ev.data.name)
+}
+await harness.close()</pre>
+        <p>Python 用法类似：SDK 运行时 wheel 把普通 <code>dsh</code> CLI 打包成平台相关包，客户端默认以显式 Harness home 启动 <code>dsh --profile sdk</code>。</p>
+
+        <h2>第五步：验证与收尾</h2>
+        <p>按 DSH 的工程约定，改完代码至少要跑：</p>
+        <pre data-nohl>pnpm run typecheck        # 类型
+pnpm run lint             # 风格
+pnpm run test             # 单元测试
+pnpm run build:check      # 构建产物与契约检查
+pnpm run doc-sync         # 若改了文档 / 类型 / 生成目录</pre>
+        <div class="box warn">
+          <div class="box-title">⚠️ 两个容易踩的坑</div>
+          <ul style="margin:6px 0 0">
+            <li><b>版本会变</b>：DSH 处于「开发者预览」，破坏性变更常见。上面代码是<b>结构示意</b>，字段名请以你 clone 的版本源码为准。</li>
+            <li><b>不要绕过 <code>dsh</code> profile 启动</b>：仓库明确规定，只有 <code>dsh</code> profile 能启动受支持的 Node 应用；package bin、demo、内联应用树都是被拒绝的路径。</li>
+          </ul>
+        </div>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>docs/cookbook/adding-a-tool.zh.md</code> —— 加工具的逐步指南（含验证步骤）</li>
+            <li><code>docs/cookbook/adding-a-package.zh.md</code> · <code>adding-an-llm-adapter.zh.md</code> · <code>adding-a-settings-card.zh.md</code></li>
+            <li><code>docs/user/guide/python-sdk.zh.md</code> · <code>packages/sdk/client</code> · <code>packages/sdk/server</code></li>
+            <li><code>README.zh.md</code> —— 从源码运行</li>
+          </ul>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">给 DSH 新增一个工具，最核心的动作是？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>修改 <code>agent-loop</code> 的循环代码</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>在插件里用 <code>ctx.tools.register(defineTool(...))</code> 注册一个 ToolDefinition</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>直接编辑会话日志</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>修改模型的权重</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>工具就是注册表里的一条 ToolDefinition；schema 会自动进入下一次提示词组装，无需改循环。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">TypeScript SDK 驱动 DSH 时，两者靠什么通信？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>共享内存</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>stdio 上的 JSON-RPC（子进程）</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>直接 import 内部模块</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>操作系统的剪贴板</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>SDK 启动一个 <code>dsh --profile sdk</code> 子进程，通过 stdio JSON-RPC 通信，进程隔离、可跨语言。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 14 章 · 技能、MCP 与扩展 · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch14">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 14 章 · 第四部 编排与扩展</span>
+        <h1>技能、MCP 与运行时扩展</h1>
+        <p class="ch-lead">前三层「能力」来自 DSH 自己：工具、子代理、workflow。但真实世界的能力远不止这些——你有自己的操作手册（Skill）、外部工具服务器（MCP）、甚至想让模型在运行时自己「装一个新插件」（extensions）。这一章讲 DSH 如何把这些都接进来，而<b>核心一行不改</b>。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会明白</div>
+          <ul>
+            <li>Skill 是什么、发现优先级如何排、目录怎么注入、正文怎么按需加载；</li>
+            <li>MCP 如何把外部服务器的工具变成原生工具，资源与指令怎么处理；</li>
+            <li>extensions：模型在运行时挂载/卸载动态 Cordis 插件；</li>
+            <li>Claude Code 模组桥接与人类命令（slash command）的区别。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：兴趣班手册、外挂工具箱、现场改装</div>
+          <ul style="margin:6px 0 0">
+            <li><b>Skill</b>＝一本本「兴趣班手册」（<code>SKILL.md</code>）。书架上有目录（只有标题+一句话简介），需要时才翻开某本细读。</li>
+            <li><b>MCP</b>＝校外的「工具供应商」。你告诉他你要什么，他提供一整套工具，学校把它们当自己的工具用。</li>
+            <li><b>Extensions</b>＝允许在课堂上<b>现场改装</b>机器人：模型自己写一个小插件，装上、用、再拆掉。</li>
+            <li><b>Commands</b>＝写在黑板上的「快捷指令」，比如 <code>/compact</code>，人一喊就执行，<b>不经过模型</b>。</li>
+          </ul>
+        </div>
+
+        <h2>Skill：可复用的「操作手册」</h2>
+        <p>Skill 是<b>可选的指令</b>，不是会话事件。它由三部分组成：Service Definition（<code>ctx.skills</code>）、本地提供方（<code>dsh-skill-filesystem</code>）、以及面向模型的消费者（<code>dsh-tool-skill</code>）。</p>
+        <h3>发现优先级</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Rank</th><th>来源</th><th>根目录</th></tr></thead>
+            <tbody>
+              <tr><td>100</td><td><code>project-dsh</code></td><td><code>&lt;projectRoot&gt;/.dsh/skills</code></td></tr>
+              <tr><td>200</td><td><code>project-agents</code></td><td><code>&lt;projectRoot&gt;/.agents/skills</code></td></tr>
+              <tr><td>300</td><td><code>custom</code></td><td><code>Config.customSkillDirs</code></td></tr>
+              <tr><td>400</td><td><code>user-dsh</code></td><td><code>&lt;dshHome&gt;/skills</code></td></tr>
+              <tr><td>500</td><td><code>user-agents</code></td><td><code>&lt;agentsHome&gt;/skills</code></td></tr>
+              <tr><td>600</td><td><code>bundled</code></td><td>配置了 <code>bundledSkillDir</code> 时使用该目录</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>skill 名必须是 kebab-case。本地提供方接受两种布局：目录包 <code>&lt;name&gt;/SKILL.md</code>，或扁平文件 <code>&lt;name&gt;.md</code>。重名时 rank 越小越优先；同一层内按提供方顺序、本地顺序裁决。</p>
+
+        <h3>目录注入 ≠ 正文加载</h3>
+        <div class="diagram">
+          <div class="flow">
+            <div class="node amber">发现 skills<small>只拿 name + description</small></div>
+            <span class="arrow">→</span>
+            <div class="node" style="--nc:var(--brand)">注入 &lt;system-reminder&gt;<small>模型看到「有这些技能」</small></div>
+            <span class="arrow">→</span>
+            <div class="node teal">模型调用 skill({name})<small>按需加载正文</small></div>
+            <span class="arrow">→</span>
+            <div class="node green">返回 &lt;skill_content&gt;<small>正文 + 资源引导</small></div>
+          </div>
+          <div class="diagram-caption">目录只有名字与描述（≤500 字），<b>不含正文、路径、来源</b>；正文只在模型真的调用时才读取。这样上下文不会被一堆手册撑爆。</div>
+        </div>
+        <ul>
+          <li>目录作为持久的 <code>user/message</code>（<code>&lt;system-reminder&gt;</code>）注入，随变化替换；压缩把它遮住后，下次观测会重建。</li>
+          <li><code>SkillInvocationPolicy</code> 把调用控制拆成两个独立布尔：<code>modelInvocable</code> / <code>userInvocable</code>。仅用户可调用的 skill 不会出现在模型目录里。</li>
+          <li><code>skill({name})</code> 工具会再次检查 <code>isModelInvocable</code>，并按调用方 agent 的 cwd 重新读取正文。</li>
+        </ul>
+
+        <h2>MCP：把外部工具接成原生工具</h2>
+        <p>模型上下文协议（Model Context Protocol，MCP）让模型使用外部服务器提供的工具。DSH 的做法很干净：<b>每个已配置服务器提供普通 Harness 工具</b>，因此它们自动继承取消、权限检查、结果记录、图像输出等一整套流水线能力。</p>
+        <div class="mini-cards">
+          <div class="mini-card"><div class="mc-t">🔌 连接</div><div class="mc-d">每服务器一个 <code>@deepseek-ai/dsh-mcp-client</code> 条目；支持 stdio 与 Streamable HTTP；官方 SDK 负责协商与取消。</div></div>
+          <div class="mini-card"><div class="mc-t">🧰 工具适配</div><div class="mc-d">发现到的工具适配到 Harness 执行过程；公开工具名包含服务器名，避免不同服务器同名冲突。</div></div>
+          <div class="mini-card"><div class="mc-t">📚 资源</div><div class="mc-d">共享 <code>mcp-resources</code> 服务提供资源列举/读取；需显式指定服务器名。</div></div>
+          <div class="mini-card"><div class="mc-t">📝 指令</div><div class="mc-d">服务器的非空指令作为带归属的作用域章节，进入已记录的系统提示词。</div></div>
+        </div>
+        <p>注意：MCP 客户端<b>不发布共享的 <code>ctx.mcp</code> 服务</b>，它就是工具注册表的一个消费者；连接失败不会移除共享资源工具（只要可见的客户端条目还激活）。</p>
+
+        <h2>Extensions：运行时自我改装</h2>
+        <p>这是最「科幻」的一块：<code>extensions</code> 允许 agent <b>在运行时挂载/卸载动态 Cordis 插件</b>。模型写一段插件定义（<code>cordis_define</code>），经审批后装进正在运行的 Host（必要时还有浏览器半侧）。</p>
+        <div class="flow">
+          <div class="node violet">模型写插件定义</div>
+          <span class="arrow">→</span>
+          <div class="node amber">审批 / 版本检查</div>
+          <span class="arrow">→</span>
+          <div class="node teal">Host 挂载（cordis-host-runner）</div>
+          <span class="arrow">→</span>
+          <div class="node green">（可选）Client 半侧挂载</div>
+        </div>
+        <div class="box warn">
+          <div class="box-title">⚠️ 能力越大，责任越大</div>
+          <p>动态插件拥有宿主权限。所以这块全是「显式启用 + 审批 + 版本保护 + 运行时检查 + 生命周期清理」。别把它当成随手可用的玩具——它是给高级自动化场景准备的。</p>
+        </div>
+
+        <h2>Claude Code 模组 & 人类命令</h2>
+        <div class="two-col">
+          <div class="box source" style="margin:0">
+            <div class="box-title">🧩 Claude Code 模组桥接</div>
+            <p class="small">实验性包 <code>claude-code-mods</code> 能加载为 Claude Code 写的 hook 模组（<code>defineMod</code>），把 <code>session.start</code>、<code>tool.call</code>、<code>prompt.submit</code> 等事件映射到 DSH 的 <code>agent/*</code>、<code>tools/execute</code> 上。文档里有一张逐条对比表，说明哪些行为一致、哪些不同（比如 <code>next()</code> 只能调用一次）。</p>
+          </div>
+          <div class="box tip" style="margin:0">
+            <div class="box-title">⌨️ 人类命令（slash command）</div>
+            <p class="small">以 <code>/</code> 开头的指令，由 <code>ctx.commands</code> 注册与分派，<b>不会变成模型消息</b>。它既不同于面向模型的「工具」，也不同于 <code>ctx.shell</code> 执行的 shell 命令。例：<code>/compact</code>、<code>/goal</code>、<code>/plan</code>、<code>/permission</code>。</p>
+          </div>
+        </div>
+
+        <h2>一张表：四种「扩展」的区别</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>扩展方式</th><th>谁触发</th><th>典型用途</th></tr></thead>
+            <tbody>
+              <tr><td>Skill</td><td>模型按需加载 / 用户显式调用</td><td>可复用的操作手册与领域知识</td></tr>
+              <tr><td>MCP 服务器</td><td>模型调用其暴露的工具</td><td>接入外部工具生态（数据库、浏览器、SaaS）</td></tr>
+              <tr><td>Extensions（动态插件）</td><td>模型写、审批后挂载</td><td>运行时自我改装、临时能力</td></tr>
+              <tr><td>Commands</td><td>人类输入 <code>/xxx</code></td><td>不需要模型介入的快捷操作</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>docs/subsystems/skills.zh.md</code> —— 发现优先级、SkillSummary/Candidate/Definition（本章主要依据）</li>
+            <li><code>docs/subsystems/mcp.zh.md</code> —— MCP 职责、协议、资源与指令</li>
+            <li><code>docs/subsystems/extensions.zh.md</code> —— cordisInspect / dynamicCordisRunner / inspector</li>
+            <li><code>docs/subsystems/claude-code-mods.zh.md</code> —— 与 Claude Code 的逐条差异</li>
+            <li><code>docs/subsystems/commands.zh.md</code> —— 人类命令注册表</li>
+          </ul>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">模型在会话里看到的「技能目录」通常包含什么？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>每个技能的完整正文</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>只有技能名与简短描述，不含正文/路径/来源</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>所有技能的绝对路径</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>技能作者的邮箱</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>目录只含 name 与规范化描述（≤500 字）；正文在模型真正调用 <code>skill({name})</code> 时才按需读取。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">人类命令（如 <code>/compact</code>）与「工具」最本质的区别是？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>命令不能带参数</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>命令由人类适配器直接分派，<b>不会变成模型消息</b>；工具则是模型调用的能力</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>命令只能由模型触发</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>两者完全一样</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>命令属于「命令平面」，由 <code>ctx.commands</code> 分派，无需模型轮次；工具是面向模型的调用能力。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

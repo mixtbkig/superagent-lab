@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 2 章 · 一切皆插件：Cordis · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch02">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 2 章 · 第一部 建立直觉</span>
+        <h1>一切皆插件：Cordis</h1>
+        <p class="ch-lead">DSH 底层是一个叫 <b>Cordis</b> 的插件框架。它的核心思想只有一句：<b>没有特权内核，产品的一切都是插件</b>——模型适配器、工具注册表、会话日志、甚至 Agent 循环本身，都可以从配置里换掉。理解 Cordis，是读懂 DSH 源码的第一把钥匙。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会明白</div>
+          <ul>
+            <li>Cordis 的 5 个核心概念：插件、上下文、依赖注入、类型化事件、可逆副作用；</li>
+            <li><code>ctx.tools</code> / <code>ctx.llm</code> 这类「服务」到底是什么；</li>
+            <li>5 种事件分发模式（emit / waterfall / parallel / serial / bail）的区别；</li>
+            <li>为什么「注册就是副作用」能让热重载与清理变得干净。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：乐高 + 插座板</div>
+          <p>把整个 harness 想成一间<b>没有承重墙的乐高房间</b>。每件家具（插件）都不是钉死在地上的，而是插在一块<b>插座板</b>（上下文 <code>ctx</code>）上。</p>
+          <ul style="margin:6px 0 0">
+            <li><b>插座板上有很多编号插口</b>：<code>ctx.tools</code>、<code>ctx.llm</code>、<code>ctx.sessions</code>……谁占了某个插口，谁就提供这项服务。</li>
+            <li><b>家具会写「我需要几号插口」</b>（<code>inject</code>）。没通电它就不启动，电一通它自动开始工作——你不用手动排启动顺序。</li>
+            <li><b>拔掉家具，插座自动断电、电线自动收回</b>（<code>effect</code>）。不会留下半截电线。</li>
+            <li><b>家具之间靠「广播」沟通</b>（事件）：广播一句「有人要调用工具啦」，感兴趣的家具自己举手。</li>
+          </ul>
+        </div>
+
+        <h2>五个核心概念</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>概念</th><th>一句话</th><th>类比</th></tr></thead>
+            <tbody>
+              <tr><td><b>插件 Plugin</b></td><td>一个实现 Service 的对象：函数 <code>apply(ctx)</code> 或 <code>Service</code> 子类</td><td>一件家具</td></tr>
+              <tr><td><b>上下文 Context</b></td><td>服务的容器，一项服务占据稳定的 <code>ctx.&lt;key&gt;</code></td><td>插座板 / 总机</td></tr>
+              <tr><td><b>依赖注入 inject</b></td><td>声明「我需要哪些服务」，等它们就绪才启动</td><td>家具上的「需 220V」标签</td></tr>
+              <tr><td><b>类型化事件 Event</b></td><td>服务用 TS 声明合并注册事件名，用 emit/waterfall/… 分发</td><td>广播喇叭</td></tr>
+              <tr><td><b>可逆副作用 Effect</b></td><td>注册通过 <code>ctx.effect()</code> / <code>ctx.on()</code> 安装，卸载时自动撤销</td><td>自动收线的插头</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2>上下文是一棵树</h2>
+        <p>Cordis 的 <code>ctx</code> 不是平的，而是一棵<b>插件树</b>。根上下文派生出一层层子上下文；子上下文继承父的服务，但可以局部覆盖、局部注册。DSH 正是用这棵树实现了「全局」与「按 agent 作用域」两种注册（后面章节会大量用到）。</p>
+
+        <div class="diagram" data-widget="nodes">
+          <div class="flow-col" style="gap:16px">
+            <div class="node clickable violet" data-kicker="根上下文" data-title="ctx（root）" data-desc="整个进程的根插件树。base 组合包、工具、模型适配器、会话存储等都挂在这里。" data-code="ctx.tools / ctx.llm / ctx.sessions / ctx.agents">ctx（root）<small>全局服务层</small></div>
+            <div class="arrow">↓ 派生</div>
+            <div class="flow" style="gap:16px">
+              <div class="node clickable" data-kicker="插件" data-title="dsh-base 组合包" data-desc="一串 insert 插件行：模型适配器、工具、持久化、沙箱、设置。它本身不执行逻辑，只负责“把家具插上”。" data-code="packages/bundle/base/cordis.patch.yml">组合包 base<small>一整排插件</small></div>
+              <div class="node clickable teal" data-kicker="按 agent 作用域" data-title="agent.ctx" data-desc="每个活跃 agent 拥有自己的子上下文。在这里注册的工具/提示词/监听器只对该 agent 可见，agent 卸载时一起回收。" data-code="agent.ctx.fs / agent.ctx.tools.restrict(...)">agent.ctx<small>每个 agent 一个</small></div>
+            </div>
+          </div>
+          <div class="node-detail" style="margin-top:18px;padding:14px 16px;border:1px dashed var(--line);border-radius:12px;min-height:60px;font-size:13.5px;color:var(--ink-3)">
+            👆 点上面的方块，看它代表什么。
+          </div>
+          <div class="diagram-caption">插件树：根上下文提供全局服务；子上下文做局部覆盖与按 agent 的作用域。</div>
+        </div>
+
+        <h2>服务（Service）长什么样</h2>
+        <p>一项服务就是一个带 <code>ctx.&lt;key&gt;</code> 的类。比如工具注册表 <code>ctx.tools</code> 提供 <code>register()</code> / <code>schemas()</code> / <code>execute()</code>；会话存储 <code>ctx.sessions</code> 提供创建与打开会话。其他插件从不 <code>import</code> 具体实现，而是根据 key 去上下文里查：</p>
+
+        <div class="code-file">一个最小插件：注入服务、注册一个工具、监听一个事件（示意）</div>
+<pre data-nohl>import { Service, Context } from '@deepseek-ai/cordis'
+
+export const inject = ['tools', 'llm']        // ① 声明依赖：等这两个服务就绪
+
+export function apply(ctx: Context) {
+  // ② 注册一个服务（占据一个 ctx key）
+  ctx.set('greeter', new GreeterService(ctx))
+
+  // ③ 注册是可逆副作用：disposer 会在插件卸载时自动执行
+  ctx.effect(() => ctx.tools.register({
+    name: 'hello',
+    description: 'say hello',
+    parameters: {},
+    output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: v }] },
+    async execute() { return 'hello, world' },
+  }))
+
+  // ④ 监听类型化事件；waterfall 监听器必须调用 next() 才能把链传下去
+  ctx.on('tools/pre-execute', async (exec, next) => {
+    ctx.logger.info('about to run', exec.name)
+    return next()          // 不调用 next() 就等于“短路”，下游看不到
+  })
+}
+
+class GreeterService extends Service {
+  constructor(ctx: Context) { super(ctx, 'greeter') }
+}</pre>
+
+        <div class="box insight">
+          <div class="box-title">💡 为什么这很重要？</div>
+          <p>注意上面没有任何「注册表在启动时被 new 出来」的代码。服务是插件<b>在挂载时</b>占据的；一旦插件卸载，它占的 key、注册的工具、绑的监听器<b>全部自动撤销</b>。这就是为什么 DSH 能做到热重载，也是为什么「加功能」永远不需要改内核：你只是多插了一件家具。</p>
+        </div>
+
+        <h2>事件：插件之间怎么说话</h2>
+        <p>服务方法适合「直接调用」（<code>ctx.tools.execute()</code>）；而「拦截、观察、加策略」用事件。Cordis 有 5 种分发模式，区别只在两件事：<b>是否 await</b>、<b>有没有返回值</b>：</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>模式</th><th>await？</th><th>顺序</th><th>有返回值？</th><th>典型用途</th></tr></thead>
+            <tbody>
+              <tr><td><code>emit</code></td><td>否</td><td>按注册顺序观察</td><td>否</td><td>纯通知（如「某事件发生了」）</td></tr>
+              <tr><td><code>waterfall</code></td><td>否</td><td>按注册顺序，环绕中间件</td><td><b>是</b></td><td>拦截/改写决策（审批、pre-step、tools/pre-execute）</td></tr>
+              <tr><td><code>parallel</code></td><td>是</td><td>所有监听器并行</td><td>否</td><td>并行扇出</td></tr>
+              <tr><td><code>serial</code></td><td>是</td><td>按注册顺序，串行</td><td><b>是</b></td><td>按序执行（如 turn-stopping）</td></tr>
+              <tr><td><code>bail</code></td><td>否</td><td>按注册顺序，遇到返回 bail 值就停</td><td><b>是</b></td><td>「谁先给答案听谁的」</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>waterfall：最像「洋葱」的事件</h3>
+        <p>waterfall 是 DSH 里最常用、也最容易写错的一种。每个监听器收到 <code>(...args, next)</code>：</p>
+        <div class="diagram">
+          <div class="flow">
+            <div class="node amber">监听器 A<small>改个字段，调用 next()</small></div>
+            <span class="arrow">→</span>
+            <div class="node amber">监听器 B<small>调用 next()</small></div>
+            <span class="arrow">→</span>
+            <div class="node green">监听器 C<small>直接返回结果（短路）</small></div>
+          </div>
+          <div class="diagram-caption">A、B 是「协作型」监听器：改共享对象后必须 next() 把控制权交下去；C 拥有最终决策权，直接返回即可，下游不再执行。</div>
+        </div>
+        <div class="box warn">
+          <div class="box-title">⚠️ 最常见的 bug</div>
+          <p>写 waterfall 监听器却<b>忘了调用 <code>next()</code></b>，就等于无意中短路了整条链——后面的审批、沙箱、日志全都不会运行。DSH 的仓库约定里专门写了一条：<b>waterfall 监听器必须调用 <code>next()</code> 才能委托</b>。</p>
+        </div>
+
+        <h2>能力 seam：Cordis 之上的一层约定</h2>
+        <p>「一切皆插件」再往前一步，就是 <b>能力 seam（接缝）</b>。一个 seam 永远是三个角色一起设计的：</p>
+        <div class="mini-cards">
+          <div class="mini-card"><div class="mc-t"><span class="mc-i">📜</span>Service Definition</div><div class="mc-d">声明接口：一个拥有 <code>ctx.&lt;key&gt;</code> 的 Cordis Service（抽象类或具体注册表）。</div></div>
+          <div class="mini-card"><div class="mc-t"><span class="mc-i">🔌</span>Service Provider</div><div class="mc-d">实现它：本地、沙箱、远程、SSH 版本可以互换。</div></div>
+          <div class="mini-card"><div class="mc-t"><span class="mc-i">👤</span>Consumer</div><div class="mc-d">使用它：通常是面向模型的工具。</div></div>
+        </div>
+        <p>规范范例是 <b>shell</b>：<code>dsh-shell</code> 定义 <code>ctx.shell</code>，<code>dsh-bash-local</code> / <code>dsh-bash-sandbox</code> 是两种实现，<code>dsh-tool-bash</code> 是消费者。于是<b>把文件系统与进程提供方一起指向远程沙箱，Bash、PTY、LSP 就全都跟着搬过去了</b>，不需要为每个工具写特例。这是 DSH 架构里最优雅的一点。</p>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>docs/cordis-primer.zh.md</code> —— 五个核心概念与分发模式（本章主要依据）</li>
+            <li><code>docs/capability-seams.zh.md</code> —— 完整的能力 seam 图（764 行，含所有服务与服务提供方）</li>
+            <li><code>docs/glossary.zh.md</code> —— <code>capability-seam</code>、<code>agent-scope</code> 等术语的权威定义</li>
+            <li><code>vendor/</code> —— 以 vendor 方式引入的 Cordis 源码</li>
+          </ul>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">一个 waterfall 监听器如果<b>没有</b>调用 <code>next()</code> 就返回了，会发生什么？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>报错，程序崩溃</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>短路整条链，下游监听器都不会执行</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>自动调用 next()，没有影响</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>事件会被重复分发一次</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>waterfall 是「环绕中间件」：只有调用 next() 才把控制权交给下游。故意短路是合法的（策略监听器拥有决策权时），但忘了 next() 往往是无意 bug。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">「注册是可逆副作用」最直接的好处是什么？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>让代码运行得更快</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>插件卸载时，它注册的服务、工具、监听器会被自动撤销，不留残留</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>自动帮模型生成提示词</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>让事件只能被触发一次</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>每个注册都返回（或由 effect 管理）一个 disposer，teardown 时按序释放。这让热重载、按 agent 清理、失败回滚都变得干净可靠。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

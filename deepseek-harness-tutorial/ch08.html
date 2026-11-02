@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 8 章 · 工具系统（上）· DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch08">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 8 章 · 第二部 核心引擎</span>
+        <h1>工具系统（上）：注册表与 Schema</h1>
+        <p class="ch-lead">工具是 harness 真正「动手」的地方。但「注册一个工具」远不止写个函数：它要声明面向模型的 schema、要能按 agent 作用域过滤、要支持条件准入、要能并发分区。这一章讲工具的<b>静态结构</b>；下一章讲它<b>怎么被执行</b>。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会明白</div>
+          <ul>
+            <li><code>ToolDefinition</code> 的每个字段，以及哪些字段<b>绝不能</b>泄漏给模型；</li>
+            <li><code>defineTool</code> 的 schema DSL（<code>ValueSchemaSpec</code>）如何推导参数类型；</li>
+            <li>作用域（scope）与 <code>ToolRestriction</code>：为什么子 agent 能看到不同的工具集；</li>
+            <li>条件准入 <code>when</code> 与「步骤拥有的准入集合」。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：一个工具箱</div>
+          <p>每个工具就像工具箱里的一件工具，箱子上贴着三样东西：</p>
+          <ul style="margin:6px 0 0">
+            <li><b>使用说明书（schema）</b>：叫什么、干什么、需要什么参数。这是给模型看的，必须精确。</li>
+            <li><b>安全标签（timeout / 并发 / 能否修改共享状态）</b>：给调度器看的，<b>模型看不到</b>。</li>
+            <li><b>使用权限（restriction）</b>：哪些同学可以借这件工具。低年级同学可能只准用剪刀，不准用美工刀。</li>
+          </ul>
+        </div>
+
+        <h2>ToolDefinition：一个工具的完整档案</h2>
+        <p>注册表里存的是「工具定义」，它同时包含「模型看得见的部分」和「只有宿主看得见的部分」。这两者必须严格分开——<code>schemas()</code> 只把 <code>name / description / parameters</code> 发给模型。</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>字段</th><th>模型可见？</th><th>作用</th></tr></thead>
+            <tbody>
+              <tr><td><code>name</code> / <code>description</code> / <code>parameters</code></td><td>✅ 是</td><td>面向模型的工具 schema</td></tr>
+              <tr><td><code>output</code></td><td>❌ 否</td><td>规范输出声明：<code>schema</code>（原始 JSON Schema）+ <code>render()</code>（把值转成 ContentBlock）+ <code>presentationMeta()</code></td></tr>
+              <tr><td><code>execute(args, exec)</code></td><td>❌ 否</td><td>真正干活的函数，返回规范 JSON 值</td></tr>
+              <tr><td><code>timeoutMs</code></td><td>❌ 否</td><td>协作式超时预算（由 timeout 策略包装 <code>tools/execute</code> 强制执行）</td></tr>
+              <tr><td><code>isConcurrencySafe(args)</code></td><td>❌ 否</td><td>纯同步分类器：返回 <code>true</code> 才允许与兄弟调用并行</td></tr>
+              <tr><td><code>projectContent</code> / <code>finalizeContent</code></td><td>❌ 否</td><td>内容投影的两个钩子（执行前准备 / 最后一道仅内容变换）</td></tr>
+              <tr><td><code>presentCall</code> / <code>presentResult</code></td><td>❌ 否</td><td>纯展示函数：UI 如何画「进行中 / 已完成」的卡片</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="box warn">
+          <div class="box-title">⚠️ 一条硬规则</div>
+          <p><code>output / execute / projectContent / finalizeContent / timeoutMs / isConcurrencySafe / presentCall / presentResult</code> <b>绝不能</b>泄漏到模型请求中。<code>schemas()</code> 通过显式允许列表构建 <code>ToolSchema[]</code>。这不是洁癖，而是安全与稳定性的要求：模型不该看到你的实现细节与调度元数据。</p>
+        </div>
+
+        <h2>defineTool：用 Schema DSL 写工具</h2>
+        <p>第一方工具不手写校验；它们用 <code>defineTool</code>，由它根据 schema 推导参数类型、校验输入、推导 <code>execute</code> 的返回类型：</p>
+        <div class="code-file">用 defineTool 注册一个「读文件」工具（示意）</div>
+<pre data-nohl>export const readTool = defineTool({
+  name: 'read',
+  description: 'Read a file from the workspace',
+  parameters: {
+    path: { type: 'string', required: true },       // required: true 标记必填
+    offset: { type: 'integer' },                     // 可选
+    limit: { type: 'integer' },
+  },
+  output: {
+    schema: { type: 'string' },                      // 规范返回：字符串
+    render: (_args, value) => [{ type: 'text', text: value }],
+  },
+  async execute({ path, offset, limit }, exec) {     // 参数已被推导为精确类型
+    return await fs.readText(path, { offset, limit, signal: exec.signal })
+  },
+  timeoutMs: 10_000,
+  isConcurrencySafe: () => true,                     // 只读 → 可并行
+  presentCall: (args) => ({ card: 'file', title: `Read ${args.path}` }),
+})</pre>
+        <p>参数不匹配会抛 <code>ToolArgsError</code>（<code>INVALID_ARGS</code>）；函数体或后置策略产出无效值会抛 <code>ToolOutputError</code>（<code>INVALID_TOOL_OUTPUT</code>）。两者都走常规工具错误路径，不会把整个会话搞崩。</p>
+        <p>Schema DSL 支持的节点：<code>string / number / integer / boolean / null / array / object / json / oneOf</code>。标量还支持 <code>enum</code> 与 <code>const</code>；对象节点必须显式声明 <code>additionalProperties</code>。精确推导最多到 16 层容器，之后回退为 <code>JsonValue</code>——这是为了防止把 TypeScript 的类型实例化栈打爆。</p>
+
+        <h2>作用域：谁能看见哪些工具</h2>
+        <p>DSH 的工具可见性只有两层，是扁平的：<b>全局的</b>（所有 agent 可见）或<b>带作用域的</b>（恰好属于一个 scope key）。约定是：<b>一个活跃 agent 就是它自己 scope 的 key</b>。带作用域的注册不会向下继承给 subagent；子树行为靠 lineage 数据表达，从不靠 scope 结构。</p>
+        <div class="diagram" data-widget="nodes">
+          <div class="flow">
+            <div class="node clickable violet" data-kicker="全局层" data-title="全局工具集" data-desc="由 base 组合包与 repository 插件挂载：read/write/edit/bash/web/subagent/workflow/... 所有 agent 默认可见。" data-code="ctx.tools.register(...) @ root">全局工具<small>所有 agent</small></div>
+            <span class="arrow">→</span>
+            <div class="node clickable amber" data-kicker="作用域过滤" data-title="ToolRestriction" data-desc="每个 scope 可以加 allow/deny 过滤器，只看自己关心的工具。多个 restriction 取交集；被过滤掉的工具既不出现、也拒绝执行，与不存在无法区分。" data-code="ctx.tools.restrict({ deny: ['bash'] })">restriction<small>按 agent 过滤</small></div>
+            <span class="arrow">→</span>
+            <div class="node clickable teal" data-kicker="作用域注册" data-title="scope-local 注册" data-desc="在该 scope 自己注册的工具，不受 restriction 约束，且同名时会 shadow 掉全局同名工具（最具体者胜出）。" data-code="agent.ctx.tools.register({ name:'read', ... })">scope-local<small>局部覆盖</small></div>
+          </div>
+          <div class="node-detail" style="margin-top:16px;padding:14px 16px;border:1px dashed var(--line);border-radius:12px;min-height:56px;font-size:13.5px;color:var(--ink-3)">
+            👆 点方块，看每一层的内容。
+          </div>
+          <div class="diagram-caption">工具解析：全局层 → 作用域限制（取交集）→ 叠加作用域自身注册（可 shadow）。被委派的子 agent 会保留它回报所依赖的工具。</div>
+        </div>
+
+        <h2>条件准入：这一步到底允不允许用这个工具</h2>
+        <p>有些工具只在特定条件可用，比如「plan 模式下不允许写文件」。DSH 的机制是：注册时给一个 <code>when(context)</code> 条件；<b>每个拟议步骤</b>，agent-loop 以捕获的模型选择调用一次 <code>ctx.tools.resolve()</code>，得到一个「本步准入集合」：</p>
+        <pre data-nohl>interface ToolActivationContext {
+  agent: Agent
+  modelSelection: Readonly<ModelSelection>   // provider / model / reasoning effort
+  signal: AbortSignal
+}
+// 注册时：
+ctx.tools.register(def, { when: (c) => c.modelSelection.model !== 'some-model' })</pre>
+        <ul>
+          <li>返回的 <code>ResolvedToolSet</code> 决定该步骤的<b>工具声明、执行器分区、批次里每一次调用</b>（含 PTC 子调用）。</li>
+          <li>执行时 <code>ctx.tools.executable()</code> 会再套一层——没有集合时排除所有条件注册。</li>
+          <li>同名替换或新限制会阻止「尚未开始」的调用使用已准入注册；步骤批次结束后释放集合。</li>
+        </ul>
+
+        <h2>工具是「可扩展的」，不是「写死的」</h2>
+        <p>正因为工具只是注册表里的一条记录，DSH 的大部分「能力」都能以工具的形式出现，而不必改循环：<code>fs</code> 的 read/write/edit、<code>bash</code>、<code>web_search</code>、<code>subagent</code>、<code>workflow</code>、<code>skill</code>、<code>todo_write</code>、<code>ask_user_question</code>……统统是工具。第 18 章的全景图会列出所有第一方工具。</p>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>docs/subsystems/tools.zh.md</code> —— ToolDefinition、Schema DSL、restriction、条件准入（本章主要依据，887 行）</li>
+            <li><code>packages/core/tools/src/index.ts</code> / <code>schema.ts</code> / <code>presentation.ts</code></li>
+            <li><code>docs/glossary.zh.md</code> —— <code>agent-scope</code>、<code>scope key</code>、<code>shadowing</code>、<code>restriction</code></li>
+            <li><code>docs/tool-catalog.zh.md</code> —— 所有工具 schema 的生成目录（2803 行）</li>
+          </ul>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">下面哪个字段会出现在发给模型的工具 schema 里？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt" data-correct="1"><span class="k">A</span><span><code>description</code></span></button>
+              <button class="quiz-opt"><span class="k">B</span><span><code>execute</code></span></button>
+              <button class="quiz-opt"><span class="k">C</span><span><code>timeoutMs</code></span></button>
+              <button class="quiz-opt"><span class="k">D</span><span><code>presentResult</code></span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：A。</b>只有 name / description / parameters 会进模型请求；其余都是宿主侧元数据，绝不能泄漏。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">一个 scope 的 <code>ToolRestriction</code> 过滤掉了全局工具 <code>bash</code>，那么这个 agent 调用 <code>bash</code> 会怎样？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>仍然能调用，只是提示词里看不到</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>既不出现在提示词中，也拒绝执行——与这个工具不存在无法区分</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>会自动改用 scope-local 的同名工具</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>整个会话崩溃</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>被过滤掉的全局工具「既不出现在提示词中，也拒绝执行」；scope-local 注册则在过滤<b>之后</b>叠加，不受影响。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

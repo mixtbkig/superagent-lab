@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 5 章 · 会话日志：唯一真源 · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch05">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 5 章 · 第二部 核心引擎</span>
+        <h1>会话日志：唯一真源</h1>
+        <p class="ch-lead">DSH 里没有「对话历史」这个对象。有的只是一个<b>只许追加、不许修改</b>的事件日志。<code>Session</code> 就是这份日志；模型看到的全部历史，都是从日志里<b>算</b>出来的。这种设计叫<b>事件溯源（event sourcing）</b>，是理解 DSH 一切行为的底座。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会明白</div>
+          <ul>
+            <li>什么是「仅追加日志」，为什么它比「存一份消息数组」更强；</li>
+            <li><code>SessionEventMap</code> 里定义了哪些核心事件、各自负责什么；</li>
+            <li><code>deriveMessages()</code> 如何从日志投影出模型历史；</li>
+            <li>什么是 surface、<code>surfaceOp</code>，以及压缩怎么「改写历史」；</li>
+            <li>为什么 DSH 有一条铁律「模型可见 ⟺ 已记录」。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：只写不擦的日记本</div>
+          <p>普通程序会「更新变量」——把 old 值擦掉写 new 值。但 DSH 用的是<b>一本只许往后写、不许擦的日记本</b>：</p>
+          <ul style="margin:6px 0 0">
+            <li>「今天 9:00，妈妈让我写作业」——记一笔；</li>
+            <li>「9:05，我去查了字典」——记一笔；</li>
+            <li>「9:10，我写错了一个字，涂掉重写」——不能真擦，而是<b>再记一笔「第 3 行作废，改为…」</b>。</li>
+          </ul>
+          <p style="margin-top:8px">于是任何时候你翻日记，都能<b>从头重放</b>出「当时到底发生了什么」；也能从任意一页「分叉」出一本新日记。这就是事件溯源的全部魔法。</p>
+        </div>
+
+        <h2>日志长什么样：一条事件</h2>
+        <p>每个条目都是带判别的 <code>SessionEvent</code>：有单调递增的 <code>seq</code>（就是 <code>log.length</code>）、<code>time</code>（epoch 毫秒），以及按 <code>type</code> 判别的 <code>data</code> payload。因为是真正的可辨识联合，<code>switch (event.type)</code> 就能直接窄化 <code>event.data</code>。</p>
+        <div class="code-file">doc 摘录：SessionEventMap 的核心成员（完整定义见 docs/subsystems/session.zh.md）</div>
+<pre data-nohl>interface SessionEventMap {
+  'turn/start':  { turn: number }
+  'turn/end':    { turn: number; reason: TurnEndReason }
+  'step/start':  { turn: number; step: number }
+  'step/end':    { turn: number; step: number }
+  'user/message': UserMessage                 // 人类提示 / 注入上下文 / 目标续跑
+  'developer/message': { turn; step; message: DeveloperMessage; headerSeq? }
+  'system/message': { turn; step; message: SystemMessage }   // 渲染后的系统提示词
+  'assistant/message': { turn; step; message; stream; usage?; interrupted? }
+  'assistant/attempt': { turn; step; stream } // 失败/重试/取消、未产生可见内容的尝试
+  'tool/call':   { turn; step; callId; name; arguments }
+  'tool/result': { turn; step; message; error?; meta? }
+  'request/header':  { header: EpochHeader; reason; startsSeries? }
+  'request/context': RequestContext
+  'session/end-seed': { inherited?: true }
+}</pre>
+        <p>除了这些<b>核心</b>事件（含 <code>developer/message</code> 等），插件还可以通过 TypeScript 声明合并往 <code>SessionEventMap</code> 里加自己的事件——比如压缩包加了 <code>compaction/start|summary|end</code>，钩子桥接加了 <code>hook/invoked|result</code>。这就是「一切皆插件」在持久化层的体现。</p>
+
+        <div class="box insight">
+          <div class="box-title">💡 为什么「仅追加」这么重要？</div>
+          <ul style="margin:6px 0 0">
+            <li><b>可恢复</b>：进程崩了，重放日志就能回到崩溃前那一刻（第 12 章）。</li>
+            <li><b>可分叉</b>：从某一页复制前缀，就能开一个「平行宇宙」子会话（fork，第 13 章）。</li>
+            <li><b>可审计</b>：每次模型调用、每个工具结果都留痕，出了事能查。</li>
+            <li><b>多消费者</b>：UI、SDK、遥测、持久化都从同一份日志派生，不用各自维护一份状态。</li>
+          </ul>
+        </div>
+
+        <h2>模型历史是「算」出来的：deriveMessages()</h2>
+        <p>日志里既有 <code>turn/start</code> 这种「控制事件」，也有 <code>user/message</code>、<code>assistant/message</code> 这种「产生消息的事件」。后者叫 <b>surface 事件</b>。把 surface 事件按顺序取出来、投影成 <code>Message[]</code>，就是模型看到的历史：</p>
+        <div class="diagram">
+          <div class="flow" style="align-items:stretch">
+            <div class="node" style="flex:1.2">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">SessionEvent 日志（全部）</div>
+              <div style="text-align:left;font-family:var(--mono);font-size:11px;line-height:1.9">
+                turn/start<br>
+                <b style="color:var(--brand)">user/message</b><br>
+                step/start<br>
+                <b style="color:var(--brand)">system/message</b><br>
+                <b style="color:var(--brand)">assistant/message</b><br>
+                tool/call<br>
+                <b style="color:var(--brand)">tool/result</b> <span style="color:var(--muted)">(surface)</span><br>
+                step/end / turn/end
+              </div>
+            </div>
+            <span class="arrow big">→<br><small style="font-size:10px">deriveMessages()</small></span>
+            <div class="node teal" style="flex:1">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">模型历史 Message[]</div>
+              <div style="text-align:left;font-size:12px;line-height:1.9">
+                🟦 system<br>🧑 user<br>🤖 assistant (tool_call)<br>🛠 tool result
+              </div>
+            </div>
+          </div>
+          <div class="diagram-caption">控制事件被过滤掉；只有 surface 事件参与模型历史。回放 = 用同一组事件再算一遍。</div>
+        </div>
+
+        <h2>跟着一条消息走一遍日志</h2>
+        <p>下面演示「用户说一句话 → 模型调一次工具 → 模型收尾」时，日志是怎么长出来的，以及每一步模型能看到什么。</p>
+        <div class="stepper" data-widget="stepper">
+          <div class="stepper-head">
+            <span class="st-title">📒 日志增长模拟</span>
+            <span class="spacer"></span>
+            <span class="st-index small muted"></span>
+            <div class="step-btns"><button class="btn" data-sact="prev">上一步</button><button class="btn" data-sact="next">下一步</button></div>
+          </div>
+          <div class="stepper-body">
+            <div class="step-track">
+              <div class="step-item" data-title="turn/start" data-code="seq=0  turn/start { turn: 1 }" data-desc="轮次开幕。这是控制事件，不产生模型消息。">① turn/start</div>
+              <div class="step-item" data-title="user/message" data-code="seq=1  user/message { role:'user', content:[{type:'text',text:'读 a.ts'}] }" data-desc="用户消息进入 surface，成为模型历史里的第一条 user 消息。">② user/message</div>
+              <div class="step-item" data-title="step/start + system/message" data-code="seq=2 step/start / seq=3 system/message" data-desc="步骤开始，系统提示词作为 surface 第 0 号节点写入历史。">③ step/start</div>
+              <div class="step-item" data-title="assistant/message" data-code="seq=4 assistant/message { message:{role:'assistant',content:[tool_call read]}, stream:[...] }" data-desc="模型回复被记下，并内嵌精确的带时间流。历史里多了一条 assistant 消息（带 tool_call）。">④ assistant/message</div>
+              <div class="step-item" data-title="tool/call" data-code="seq=5 tool/call { callId, name:'read', arguments:'{\"path\":\"a.ts\"}' }" data-desc="在真正执行之前先记一笔 tool/call。这样即使执行中崩溃，也知道「曾经要调用什么」。">⑤ tool/call</div>
+              <div class="step-item" data-title="tool/result" data-code="seq=6 tool/result { message:{role:'tool',...}, ... }" data-desc="工具结果作为 surface 事件落盘，成为下一步模型能读到的 tool 消息。">⑥ tool/result</div>
+              <div class="step-item" data-title="step/end → 下一步 / turn/end" data-code="seq=7 step/end / ... / seq=N turn/end { reason }" data-desc="步骤结束。若模型还要工具就开下一步；若自然停止，则记录 turn/end，整轮收尾。">⑦ step/end</div>
+            </div>
+            <div class="step-detail"></div>
+          </div>
+        </div>
+
+        <h2>Surface 与 surfaceOp：怎么「改写」不能改的历史</h2>
+        <p>既然日志只能追加，那压缩（compaction）把一大段历史总结成一段摘要时，怎么让模型「忘掉」旧内容？答案是：<b>再追加一条 surface 事件，用 <code>surfaceOp</code> 声明它遮蔽（shadow）了哪些旧事件</b>。</p>
+        <div class="box insight">
+          <div class="box-title">💡 一句话</div>
+          <p>压缩不删除任何旧事件；它追加一条新的 <code>user/message</code>，带 <code>surfaceOp: { op: 'replace', startSeq, endSeq }</code>，把被替换的那段「盖住」。<code>deriveMessages()</code> 投影时跳过被遮蔽的节点，模型就只看到摘要。旧日志仍在，随时能追溯。</p>
+        </div>
+        <p>这也是为什么 <code>compaction/*</code> 事件本身<b>不是</b> surface 事件（不进模型历史），而摘要必须借助一条 <code>user/message</code> 才能进入模型视野。</p>
+
+        <h2>铁律：模型可见 ⟺ 已记录</h2>
+        <div class="box warn">
+          <div class="box-title">⚠️ 这是 DSH 最重要的一条不变量</div>
+          <p><b>凡是能到达模型请求的东西，都必须能从会话日志重建。</b>如果你想让模型看见一个新输入，就必须为它新增一种 session 事件；否则就违反了这条规则。这条规则保证了「回放 = 真实发生过的事」，也让调试、恢复、fork、遥测全部成立。</p>
+        </div>
+
+        <h2>assistant/message 里为什么还藏着一整条 stream？</h2>
+        <p>你可能注意到 <code>assistant/message</code> 除了消息本身，还带一个 <code>stream: AssistantStreamRecord[]</code>。这是把模型流式输出的<b>精确时间线</b>（每个 chunk 及其时间戳）压缩后内嵌进去，用来：</p>
+        <ul>
+          <li>回放时还原「打字机效果」与首 token 时间；</li>
+          <li>遥测 / token 记账直接读紧凑记录，不用展开；</li>
+          <li>失败的尝试则记为 <code>assistant/attempt</code>，同样内嵌 stream，但<b>不伪造模型历史</b>。</li>
+        </ul>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>docs/subsystems/session.zh.md</code> —— 完整 <code>SessionEventMap</code>、<code>deriveMessages()</code>、surface 类型（本章主要依据，1431 行）</li>
+            <li><code>packages/core/session/src/types.ts</code> —— 事件与 surface 的类型定义</li>
+            <li><code>docs/persistence-catalog.zh.md</code> —— 所有持久化事件（含插件合并的）的完整目录</li>
+            <li><code>docs/subsystems/persistence.zh.md</code> —— 日志如何落盘（第 12 章细讲）</li>
+          </ul>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">压缩（compaction）把长历史总结成摘要时，是怎么做到的？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>删除旧事件，写入摘要</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>追加一条带 <code>surfaceOp: replace</code> 的 user/message，遮蔽旧区间，旧事件保留</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>直接修改之前的 assistant/message 内容</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>新建一个完全不同的会话</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>日志永不删除；摘要通过一条新的 surface 事件「盖住」旧区间，deriveMessages() 投影时跳过被遮蔽的节点。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">「模型可见 ⟺ 已记录」这条规则，最主要保证了什么？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>让模型运行得更快</span></button>
+              <button class="quiz-opt"><span class="k">B</span><span>让日志占用的磁盘更小</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">C</span><span>回放能精确还原真实发生过的事，从而支撑恢复、fork、审计与遥测</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>让模型不能调用工具</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：C。</b>如果某条输入能进模型却不在日志里，回放就会失真。这条不变量是整座大厦的地基。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

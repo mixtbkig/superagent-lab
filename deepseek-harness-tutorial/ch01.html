@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 1 章 · Agent 的最小循环 · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch01">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 1 章 · 第一部 建立直觉</span>
+        <h1>Agent 的最小循环</h1>
+        <p class="ch-lead">所有 agent harness 的心脏，都是一个朴素的循环：<b>问模型 → 模型要工具 → 执行工具 → 把结果告诉模型 → 再问模型</b>。循环到模型不再要工具为止。理解了这个循环，你就理解了 DSH 里 80% 的代码在干什么。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会明白</div>
+          <ul>
+            <li>为什么「一问一答」不够，必须要循环；</li>
+            <li>一次任务如何被拆成「轮次（turn）」和「步骤（step）」；</li>
+            <li>模型调用、工具调用、工具结果三者在循环里的位置；</li>
+            <li>DSH 里哪个包实现这个循环，为什么它被设计成「可替换」。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：让同学帮你做手抄报</div>
+          <p>你对同学说：「帮我做一张关于恐龙的手抄报。」他不会一秒钟交卷，而是：</p>
+          <ol style="margin:6px 0 0">
+            <li>想了想：「我得先查资料」→ <b>要工具</b>（借一本恐龙书）；</li>
+            <li>看完书：「还要彩笔」→ <b>又要工具</b>；</li>
+            <li>画完：「帮我看看哪里要改」→ 你给反馈；</li>
+            <li>改完：「做完了！」→ <b>不再要工具</b>，任务结束。</li>
+          </ol>
+          <p style="margin-top:8px">每一步都是「他先想（Reason）、再动手（Act）、然后看结果（Observe）」。这个 <b>Reason → Act → Observe</b> 的循环，就是 Agent 循环。</p>
+        </div>
+
+        <h2>为什么不能「一问一答」？</h2>
+        <p>因为模型只能输出<b>文本</b>。当它说「我需要读一下 config.ts」时，这句话本身不会让文件被打开。必须有 harness 在中间做翻译：</p>
+        <div class="diagram">
+          <div class="flow">
+            <div class="node">用户：修好登录 bug</div>
+            <span class="arrow">→</span>
+            <div class="node brand" style="--nc:var(--brand)">模型：<small>我要调用 read("auth.ts")</small></div>
+            <span class="arrow">→</span>
+            <div class="node teal">harness 执行 read<small>返回文件内容</small></div>
+            <span class="arrow">→</span>
+            <div class="node brand" style="--nc:var(--brand)">模型：<small>我要调用 edit(...)</small></div>
+          </div>
+          <div class="diagram-caption">模型每「要一次工具」，就产生一次新的请求；harness 负责执行并把结果喂回去。</div>
+        </div>
+        <p>一次任务的工具调用次数是不确定的：可能 1 次，也可能 50 次。所以 harness 必须写成一个<b>循环</b>，而不是一条直线。</p>
+
+        <h2>两个关键单位：轮次（Turn）与步骤（Step）</h2>
+        <p>DSH 用两个词精确描述循环，这对后面读源码非常关键：</p>
+        <div class="two-col">
+          <div class="box insight" style="margin:0">
+            <div class="box-title">🔁 步骤 Step</div>
+            <p><b>一次模型请求 + 它引发的工具执行</b>。</p>
+            <p class="small muted" style="margin-bottom:0">模型说「读文件」，你执行，拿到结果——这算一个步骤。一个步骤里可以并行调多个工具。</p>
+          </div>
+          <div class="box tip" style="margin:0">
+            <div class="box-title">🌀 轮次 Turn</div>
+            <p><b>一次「把用户输入干完」的全过程</b>，包含零个或多个步骤。</p>
+            <p class="small muted" style="margin-bottom:0">从领取用户消息开始，到不再欠任何工作（模型不再要工具、也没有新消息）结束。日常说「这一轮对话」。</p>
+          </div>
+        </div>
+        <p>所以关系是：<b>一次轮次 ⊇ 多个步骤 ⊇ 一次模型请求</b>。任务越复杂，一个轮次里的步骤越多。</p>
+
+        <div class="diagram">
+          <div class="flow" style="align-items:stretch">
+            <div class="node violet" style="flex:1">Turn 开始<small>领取用户消息</small></div>
+            <span class="arrow big">→</span>
+            <div class="node" style="flex:2;display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+              <span class="node brand" style="--nc:var(--brand);padding:6px 10px">Step 1<br><small>模型→工具</small></span>
+              <span class="node brand" style="--nc:var(--brand);padding:6px 10px">Step 2<br><small>模型→工具</small></span>
+              <span class="node brand" style="--nc:var(--brand);padding:6px 10px">Step 3<br><small>模型→收尾</small></span>
+            </div>
+            <span class="arrow big">→</span>
+            <div class="node green" style="flex:1">Turn 结束<small>不再欠工作</small></div>
+          </div>
+          <div class="diagram-caption">一个 Turn 里串起若干 Step；Step 3 模型不再要工具，Turn 收尾。</div>
+        </div>
+
+        <h2>把循环拆成一步步：跟着走一遍</h2>
+        <p>下面是一次真实任务（「读一下 a.ts 并给它加一行注释」）的完整消息流。点「下一步」看每一步发生了什么。</p>
+
+        <div class="seq" data-widget="seq">
+          <div class="seq-head">
+            <span class="st-title">🔁 Agent 循环 · 消息流</span>
+            <span class="spacer"></span>
+            <span class="seq-count small muted"></span>
+            <div class="step-btns">
+              <button class="btn" data-act="prev">上一步</button>
+              <button class="btn primary" data-act="play">▶ 播放</button>
+              <button class="btn" data-act="next">下一步</button>
+            </div>
+          </div>
+          <div class="seq-stage">
+            <div class="seq-lifelines">
+              <div class="lifeline">用户 / UI</div>
+              <div class="lifeline">Agent Loop</div>
+              <div class="lifeline">模型</div>
+              <div class="lifeline">工具</div>
+              <div class="lifeline">会话日志</div>
+            </div>
+            <div class="seq-rows">
+              <div class="seq-row" data-note="用户把需求交给 Agent。Agent 把它放进收件箱 (inbox)。">
+                <div class="rt from">用户</div><div class="msgline"><span class="dashline"></span><span class="msg">followup("给 a.ts 加注释")</span><span class="dashline"></span></div><div class="rt to">Agent</div>
+              </div>
+              <div class="seq-row" data-note="Agent Loop 开启一个 Turn，并把用户消息写入会话日志（turn/start → user/message）。这就是「模型可见即已记录」。">
+                <div class="rt from">Agent</div><div class="msgline"><span class="dashline"></span><span class="msg">turn/start + user/message</span><span class="dashline"></span></div><div class="rt to">日志</div>
+              </div>
+              <div class="seq-row" data-note="Loop 从日志派生历史、组装系统提示词与工具 schema，发起第一次模型请求（step/start）。">
+                <div class="rt from">Agent</div><div class="msgline"><span class="dashline"></span><span class="msg">组装请求 → stream()</span><span class="dashline"></span></div><div class="rt to">模型</div>
+              </div>
+              <div class="seq-row ret" data-note="模型流式返回：一段文字 + 一个工具调用 read({path:'a.ts'})。这就是一个 Step 的模型部分。">
+                <div class="rt from">模型</div><div class="msgline"><span class="dashline"></span><span class="msg">tool_call: read(a.ts)</span><span class="dashline"></span></div><div class="rt to">Agent</div>
+              </div>
+              <div class="seq-row" data-note="Loop 先把 assistant/message 与 tool/call 记入日志，然后执行工具（经过审批、沙箱、权限等流水线）。">
+                <div class="rt from">Agent</div><div class="msgline"><span class="dashline"></span><span class="msg">assistant/message + tool/call</span><span class="dashline"></span></div><div class="rt to">日志</div>
+              </div>
+              <div class="seq-row ret" data-note="read 工具返回文件内容。结果被写成 tool/result 事件，成为下一步模型能看到的输入。">
+                <div class="rt from">工具</div><div class="msgline"><span class="dashline"></span><span class="msg">tool/result(content)</span><span class="dashline"></span></div><div class="rt to">日志</div>
+              </div>
+              <div class="seq-row" data-note="第二步：Loop 再次组装请求（历史里已含刚才的调用与结果），模型这次要求 edit 工具。">
+                <div class="rt from">Agent</div><div class="msgline"><span class="dashline"></span><span class="msg">组装请求 → stream()</span><span class="dashline"></span></div><div class="rt to">模型</div>
+              </div>
+              <div class="seq-row ret" data-note="模型返回 tool_call: edit(...)。第二个 Step 开始。">
+                <div class="rt from">模型</div><div class="msgline"><span class="dashline"></span><span class="msg">tool_call: edit(a.ts)</span><span class="dashline"></span></div><div class="rt to">Agent</div>
+              </div>
+              <div class="seq-row" data-note="edit 执行成功，tool/result 写入日志。">
+                <div class="rt from">工具</div><div class="msgline"><span class="dashline"></span><span class="msg">tool/result(ok)</span><span class="dashline"></span></div><div class="rt to">日志</div>
+              </div>
+              <div class="seq-row ret" data-note="最后一个 Step：模型不再要工具，只回复「改好了」。Loop 记录 assistant/message，然后 turn/end，回到空闲。">
+                <div class="rt from">模型</div><div class="msgline"><span class="dashline"></span><span class="msg">文字回复（无工具）</span><span class="dashline"></span></div><div class="rt to">Agent</div>
+              </div>
+              <div class="seq-row" data-note="Turn 结束（turn/end）。Agent 回到 idle，等待下一条消息。整轮共 3 个 Step。">
+                <div class="rt from">Agent</div><div class="msgline"><span class="dashline"></span><span class="msg">turn/end · status=idle</span><span class="dashline"></span></div><div class="rt to">日志/UI</div>
+              </div>
+            </div>
+          </div>
+          <div class="seq-note">点击「下一步」或「播放」开始。</div>
+        </div>
+
+        <div class="box insight">
+          <div class="box-title">💡 一个容易被忽略的点</div>
+          <p>注意上面每一步都先写日志、再行动：<code>turn/start</code> → <code>user/message</code> → <code>step/start</code> → <code>assistant/message</code> → <code>tool/call</code> → <code>tool/result</code> → <code>step/end</code> → <code>turn/end</code>。DSH 有一条铁律叫 <b>「模型可见 ⟺ 已记录」</b>：<b>凡是模型能看到的东西，必须先能在会话日志里被重建</b>。这是第 5 章的主线。</p>
+        </div>
+
+        <h2>DSH 里谁在转这个循环？</h2>
+        <p>这个循环在 DSH 里叫 <b>agent loop</b>，由 <code>packages/core/agent-loop</code> 这个包实现（具体是一个叫 <code>AgentLoop</code> 的插件）。它对外暴露两个东西：</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>服务 / 概念</th><th>作用</th><th>位置</th></tr></thead>
+            <tbody>
+              <tr><td><code>ctx.agents</code></td><td>Agent 的注册表：创建、恢复、查询、取消一个 agent</td><td><code>packages/core/agent</code></td></tr>
+              <tr><td><code>ctx.agentLoop</code></td><td>默认的循环驱动器：真正执行 turn/step 的引擎</td><td><code>packages/core/agent-loop</code></td></tr>
+              <tr><td><code>Agent</code> 接口</td><td>UI、hook、编排器编程时面对的「活动句柄」：<code>send / inject / steer / cancel</code></td><td><code>packages/core/agent/src/types.ts</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>它被设计成<b>插件</b>而不写死在核心里，所以理论上你能写一个完全不同的循环替换它——这正是「一切皆插件」的威力（第 2 章会讲）。</p>
+
+        <div class="code-file">packages/core/agent-loop — 循环的核心轮廓（示意，非逐字源码）</div>
+<pre data-nohl>async function driveTurn(agent) {
+  const input = claimNextStepInput(agent.inbox)   // 领取用户消息
+  await session.append({ type: 'turn/start', turn })
+  try {
+    for (;;) {
+      await session.append({ type: 'step/start', turn, step })
+      const messages = deriveMessages(session)       // 从日志派生历史
+      const request  = assembleRequest(systemPrompt, messages, tools)
+      const answer   = await llm.stream(request)     // 流式请求模型
+      await session.append({ type: 'assistant/message', ...answer })
+      if (answer.toolCalls.length === 0) break       // 不再要工具 → 收尾
+      for (const call of answer.toolCalls) {
+        await session.append({ type: 'tool/call', ...call })
+        const result = await tools.execute(call)     // 走受保护的执行流水线
+        await session.append({ type: 'tool/result', ...result })
+      }
+      await session.append({ type: 'step/end', turn, step })
+      step++
+    }
+  } finally {
+    await session.append({ type: 'turn/end', turn, reason })
+  }
+}</pre>
+        <p class="small muted">上面的代码是为了帮你建立直觉而写的「骨架」。真实的 <code>agent-loop</code> 要处理取消、重试、流式 chunk、pre-step 钩子、运行时上下文注入、工具并发、失败恢复……这些我们会在第 6 章逐个补上。</p>
+
+        <div class="box warn">
+          <div class="box-title">⚠️ 常见的误解</div>
+          <p>「模型决定什么时候结束」——对，但也不完全对。模型「不再调用工具」只是<b>自然停止</b>的一种情况；harness 还可能因为：没有新输入、被取消、达到最大轮数、触发终止策略（如 goal 完成、计划退出）而结束这一轮。控制权在 harness，不在模型。</p>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">「一次模型请求 + 它引发的工具执行」在 DSH 里叫什么？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>轮次 Turn</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>步骤 Step</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>会话 Session</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>目标 Goal</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B（步骤 Step）。</b>轮次（Turn）更大，包含零个或多个步骤；会话（Session）是整段对话的日志；目标（Goal）是跨轮次的持久任务。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">模型回复「我已经改好了」且没有要求任何工具，此时 Loop 会怎样？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>继续循环，再问一次模型</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>记录 assistant/message 后收尾：step/end → turn/end</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>立刻删除会话日志</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>把整个历史重新发给模型</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>没有工具调用 = 自然停止。Loop 会关闭当前步骤与轮次，Agent 回到 idle。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

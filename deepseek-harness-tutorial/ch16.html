@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 16 章 · 前端、传输与多端 · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch16">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 16 章 · 第五部 外围与治理</span>
+        <h1>前端、传输与多端</h1>
+        <p class="ch-lead">到现在为止我们都在讲「后厨」——模型、工具、日志、循环。但用户看到的是「前厅」：一个会打字、会画卡片、会实时更新的界面。这一章讲 DSH 如何把后厨和前厅拆开，又让同一套后厨服务 Web、Desktop、CLI、SDK、ACP 五种门店。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会明白</div>
+          <ul>
+            <li>Host（Node）与 Client（浏览器）如何分工，靠什么通信；</li>
+            <li>Typert RPC 网关与「类型图」是什么；</li>
+            <li>Web 的插件表（<code>dsh.client</code>）、<code>__DSH_BOOT__</code> 与 slot 组合；</li>
+            <li>Desktop（Electron）、SDK（JSON-RPC）、ACP 各自怎么复用同一套核心。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：前厅与后厨</div>
+          <p>餐厅里，<b>前厅</b>负责点菜、上菜、摆盘（浏览器 UI）；<b>后厨</b>负责真正做菜（Node 里的模型、工具、会话）。中间靠一张<b>点菜单</b>（RPC 协议）传话。</p>
+          <p>妙的是：同一间后厨，可以同时服务<b>堂食</b>（Web）、<b>外送</b>（Desktop）、<b>打包窗口</b>（CLI）、<b>机器人取餐</b>（SDK/ACP）。门店不同，菜谱（核心）完全一样。</p>
+        </div>
+
+        <h2>Host / Client 的分工</h2>
+        <div class="diagram">
+          <div class="flow" style="align-items:stretch">
+            <div class="node" style="flex:1;border-color:var(--brand)">
+              <div style="font-weight:900;margin-bottom:6px">🖥️ Host（Node 进程）</div>
+              <div style="text-align:left;font-size:12px;line-height:1.9">
+                <code>ctx.agents</code> / <code>ctx.sessions</code><br>
+                <code>ctx.tools</code> / <code>ctx.llm</code><br>
+                webServer · apiGateway<br>
+                持久化 · 沙箱 · MCP
+              </div>
+            </div>
+            <div class="flow-col" style="flex:0 0 auto">
+              <span class="arrow">⟷</span>
+              <div class="node amber" style="padding:6px 10px;font-size:11px">Typert RPC<br>(JSON over HTTP/WS)</div>
+            </div>
+            <div class="node" style="flex:1;border-color:var(--teal)">
+              <div style="font-weight:900;margin-bottom:6px">🌐 Client（浏览器）</div>
+              <div style="text-align:left;font-size:12px;line-height:1.9">
+                ui-conversation 组装<br>
+                slot / renderer<br>
+                ui-chat · ui-tool · ui-subagent<br>
+                connection（认证 RPC）
+              </div>
+            </div>
+          </div>
+          <div class="diagram-caption">Host 拥有「事实」；Client 只做「呈现」。所有跨进程调用都经过统一的 RPC 网关。</div>
+        </div>
+
+        <h2>Typert：让 RPC 也有类型</h2>
+        <p><code>typert</code>（type-graph）是 DSH 自研的「类型图」机制。它从 TypeScript 源码分析出远程方法的描述符（参数、返回、Context 声明），生成运行时注册表，让 Host 与 Client 之间的调用<b>在编译期就有类型</b>，而不是手写一堆 <code>unknown</code> 与运行时校验。</p>
+        <div class="mini-cards">
+          <div class="mini-card"><div class="mc-t"><span class="mc-i">🗺️</span>typert/generator</div><div class="mc-d">分析 TS 工程，生成 Typert 产物</div></div>
+          <div class="mini-card"><div class="mc-t"><span class="mc-i">📦</span>typert/protocol</div><div class="mc-d">与编译器无关的 Remote 元数据协议</div></div>
+          <div class="mini-card"><div class="mc-t"><span class="mc-i">🏷️</span>typert/registry</div><div class="mc-d">运行时注册表 + Zod schema</div></div>
+          <div class="mini-card"><div class="mc-t"><span class="mc-i">🚪</span>api/gateway</div><div class="mc-d">Host 端的 Typert Remote 分发器</div></div>
+        </div>
+
+        <h2>Web 的组装：插件表 + 启动图 + Slot</h2>
+        <p>浏览器这一侧不是一个大 bundle，而是由许多 <strong>client 插件</strong>组成的。每个包可以在 <code>package.json</code> 里声明 <code>dsh.client</code>，启动器把它们组成一棵 <code>__DSH_BOOT__</code> 启动图；HTML 的 index 注入这些行，客户端插件在同一文档里被激活。</p>
+        <div class="stepper" data-widget="stepper">
+          <div class="stepper-head">
+            <span class="st-title">🌐 Web 页面是怎么长出来的</span>
+            <span class="spacer"></span>
+            <span class="st-index small muted"></span>
+            <div class="step-btns"><button class="btn" data-sact="prev">上一步</button><button class="btn" data-sact="next">下一步</button></div>
+          </div>
+          <div class="stepper-body">
+            <div class="step-track">
+              <div class="step-item" data-title="HTTP 服务器启动" data-code="ctx.webServer.register({ kind, path, handler|resource })" data-desc="node:http 服务器监听端口；具名路由注册。先查 exact，再最长前缀，最后落到「回退席位」（SPA dist）。">① Web 服务器</div>
+              <div class="step-item" data-title="index 注入" data-code="collectIndexInjections(peer) → renderIndex(html, peer)" data-desc="客户端模块以启动 manifest 行回应该事件，被渲染进 index.html。认证在读取 dist 与 index 之前完成。">② index 注入</div>
+              <div class="step-item" data-title="客户端插件激活" data-code="window.__DSH_BOOT__ → client modules" data-desc="浏览器按启动图加载 client 插件，在同一文档里激活（无需刷新）。">③ 插件激活</div>
+              <div class="step-item" data-title="RPC 连接" data-code="ctx.connection（认证 RPC 传输 + 代次生命周期）" data-desc="Client 与 Host 建立认证 RPC；提供 Host/Origin 校验、浏览器会话认证。">④ 连接</div>
+              <div class="step-item" data-title="Slot 组合" data-code="ctx.uiRenderer / Slot registry" data-desc="UI 由一个个 slot 拼成：对话区、工具卡片、右侧边栏、底部输入框……每个插件往 slot 里贡献自己的渲染。">⑤ Slot 渲染</div>
+              <div class="step-item" data-title="Conversation 组装" data-code="SessionEventLikeEntry[] → ConversationNodeAssembler" data-desc="把 session/event 流与实时的 assistant/live-chunk 折叠成 Chat 节点；每个 target（Chat / Trajectory）有各自的 Definition 与渲染。">⑥ 对话组装</div>
+            </div>
+            <div class="step-detail"></div>
+          </div>
+        </div>
+
+        <h2>五种门店，同一后厨</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>形态</th><th>怎么跑</th><th>关键点</th></tr></thead>
+            <tbody>
+              <tr><td><b>Web</b></td><td><code>dsh web</code>：Node HTTP 服务器 + 浏览器 client 插件</td><td>默认 loopback（127.0.0.1），可用 <code>--host</code> 暴露；SSE 流 + RPC</td></tr>
+              <tr><td><b>Desktop</b></td><td>Electron 启动私有 Desktop Host，调用共享 CLI 与完整 Web 应用</td><td>窗口用 <code>file://</code> 加载已构建资源，经 Node IPC 桥接 fetch；不走本机 HTTP 服务器</td></tr>
+              <tr><td><b>CLI / headless</b></td><td><code>dsh --profile headless "task"</code></td><td>一次性运行器，无服务器；适合 CI / 脚本</td></tr>
+              <tr><td><b>SDK</b></td><td>进程外 JSON-RPC over stdio</td><td>TypeScript 客户端 + Python 运行时 wheel；即 <code>--profile sdk</code></td></tr>
+              <tr><td><b>ACP</b></td><td>Agent Client Protocol 服务器（JSON-RPC stdio）</td><td>仅面向自动化；给支持 ACP 的编辑器/工具驱动</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="box insight">
+          <div class="box-title">💡 为什么 Desktop 不用 HTTP 服务器？</div>
+          <p>因为 Electron 可以直接用 <code>file://</code> 加载打包好的前端，再通过 Node IPC 把 fetch 请求桥接到私有 Host。这避免了在本机开一个监听端口，减少了攻击面，也省了端口冲突的麻烦。Web 与 Desktop 共享产品数据，但包、启用选择与锁文件保持独立。</p>
+        </div>
+
+        <h2>Conversation：把「事件」变成「卡片」</h2>
+        <p>浏览器收到的不是「HTML」，而是一条条 <code>SessionEventLikeEntry</code>（持久事件，或实时的 <code>assistant/live-chunk</code> 瞬态事件）。<code>ui-conversation</code> 把它们折叠成 Chat 节点：</p>
+        <ul>
+          <li><b>Event Definition</b>：业务包一次匹配一个事件（或瞬态事件），按稳定 <code>(kind, id)</code> 折叠成确定性 State，可选地物化成一个节点。</li>
+          <li><b>Group Definition</b>：从物化后的节点派生「组」（如一个 workflow 运行的所有阶段）。</li>
+          <li><b>View</b>：Chat / Trajectory 等 target 只读自己的 snapshot，渲染 target 自有节点。</li>
+        </ul>
+        <p>这套设计的关键是<b>可回放</b>：历史分页与实时流走同一套匹配/更新接口，所以「刷新页面」和「一直开着」看到的是同一个东西。</p>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>docs/subsystems/web-server.zh.md</code> · <code>web-client.zh.md</code> · <code>client-modules.zh.md</code> · <code>slots.zh.md</code> · <code>conversation.zh.md</code></li>
+            <li><code>docs/api-gateway.zh.md</code> · <code>docs/subsystems/typert.zh.md</code></li>
+            <li><code>packages/host/webserver</code> · <code>packages/client/*</code> · <code>packages/api/gateway</code> · <code>packages/typert/*</code></li>
+            <li><code>apps/desktop/README.zh.md</code> · <code>packages/sdk/*</code> · <code>packages/acp/*</code></li>
+          </ul>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">在 Web 形态里，谁拥有「事实」（会话、工具、模型调用）？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>浏览器（Client）</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>Node 进程（Host）</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>两者各存一半，互相不通信</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>由 CDN 决定</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>Host 拥有事实，Client 只做呈现；所有跨进程调用经 Typert RPC。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">为什么 Desktop 应用不像 Web 那样启动一个本机 HTTP 服务器？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>因为 Electron 不支持网络</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>它用 <code>file://</code> 加载构建资源，经 Node IPC 桥接请求，避免开监听端口、减少攻击面</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>因为桌面版没有前端</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>因为它必须联网才能运行</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>Electron 用 file:// 加载前端并经 IPC 桥接 fetch；Web 形态才用 node:http 服务器。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

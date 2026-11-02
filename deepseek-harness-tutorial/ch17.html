@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 17 章 · 安全、可观测与工程约束 · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch17">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 17 章 · 第五部 外围与治理</span>
+        <h1>安全、可观测与工程约束</h1>
+        <p class="ch-lead">一个能让模型读写文件、跑命令的框架，如果安全与工程质量不过关，就是灾难。DSH 把这些「看不见的地基」也当成一等公民：多道安全闸门、完整的遥测链路，以及一套近乎苛刻的源码门禁。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会明白</div>
+          <ul>
+            <li>安全的三道闸门：沙箱、审批、守卫（guard）；</li>
+            <li>「防御性编程」清单里最关键的几条；</li>
+            <li>可观测性：OTel、会话遥测、产品遥测、token 计量；</li>
+            <li>为什么 DSH 对测试、类型、文档的要求这么高。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：工厂的安全规程 + 监控 + 质检</div>
+          <ul style="margin:6px 0 0">
+            <li><b>安全规程</b>：危险机器要有护栏（沙箱）、要家长签字（审批）、不许连轴转（守卫）。</li>
+            <li><b>监控摄像头</b>：每个车间都装摄像头，出问题能回放（遥测 / 日志）。</li>
+            <li><b>质检</b>：每件产品出厂前都要过检查（测试 / 类型 / 文档门禁）。</li>
+          </ul>
+        </div>
+
+        <h2>安全：三道闸门</h2>
+        <div class="mini-cards">
+          <div class="mini-card" style="border-left:4px solid var(--rose)"><div class="mc-t">🧱 沙箱 <code>ctx.sandbox</code></div><div class="mc-d">把子进程 argv 包进「文件效果」策略：read-only / workspace-write / danger-full-access。没有后端就 fail-closed。</div></div>
+          <div class="mini-card" style="border-left:4px solid var(--amber)"><div class="mc-t">✍️ 审批 <code>ctx.approval</code></div><div class="mc-d">危险操作前一次性授权；缺失应答者即拒绝。审计事件仅日志。</div></div>
+          <div class="mini-card" style="border-left:4px solid var(--brand)"><div class="mc-t">⏱️ 守卫 <code>guard</code></div><div class="mc-d">repeat-tool-reminder（重复调用提醒，建议性）+ timeout-policy（<code>tools/execute</code> 截止时间强制执行）。</div></div>
+        </div>
+        <div class="box warn">
+          <div class="box-title">⚠️ 安全设计的三个关键词</div>
+          <ul style="margin:6px 0 0">
+            <li><b>fail-closed（失败即关闭）</b>：拿不准就拒绝，绝不「偷偷放行」。</li>
+            <li><b>显式 &gt; 隐式</b>：默认值必须在拥有它的实现里作为一个显式的 <code>resolve(request): Spec</code> 步骤，不能藏在 <code>run()</code> 的 <code>?? default</code> 里。</li>
+            <li><b>不可静默透传</b>：受限策略下，无隔离透传永远不合法。</li>
+          </ul>
+        </div>
+
+        <h2>防御性编程：源码里的「交通规则」</h2>
+        <p>DSH 有一份专门的 <code>docs/defensive-patterns/</code>，按 artifact 分类列出评审时必须遵守的规则。几条最能代表其精神的：</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>规则</th><th>含义</th></tr></thead>
+            <tbody>
+              <tr><td>Switch 判别标签</td><td>闭合联合以 <code>assertNever</code> 结尾；可合并扩展的联合走文档化 default。不要链式 if。</td></tr>
+              <tr><td>Waterfall 必须 next()</td><td>不调用 next() 就短路整条链——大多数是 bug。</td></tr>
+              <tr><td>品牌化跨边界 ID</td><td><code>SessionId</code>、<code>ToolCallId</code>、<code>JobId</code> 不能互换，用 <code>Branded&lt;B&gt;</code>。</td></tr>
+              <tr><td>不新增 <code>as unknown</code></td><td>保持或降低既有基线；用类型化值或校验替代。</td></tr>
+              <tr><td>空 catch 要命名错误</td><td>说明为什么吞掉它，且 try 只包一条语句。</td></tr>
+              <tr><td>错误要结构化</td><td>类型化、可本地化、可行动的失败报告；明确处理归属与失败保证。</td></tr>
+              <tr><td>模型可见 ⟺ 已记录</td><td>老规矩，但也是安全与可审计的根基。</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2>可观测性：三条遥测线</h2>
+        <div class="flow" style="flex-wrap:wrap">
+          <div class="node" style="--nc:var(--violet)">otel<small>共享 Cordis OTel 上报通道</small></div>
+          <span class="arrow">·</span>
+          <div class="node" style="--nc:var(--teal)">session-telemetry<small>对外会话上报（脱敏 waterfall）</small></div>
+          <span class="arrow">·</span>
+          <div class="node" style="--nc:var(--amber)">product-telemetry<small>显式产品分析事件，OTLP/HTTP</small></div>
+          <span class="arrow">·</span>
+          <div class="node" style="--nc:var(--brand)">session-log-deepseek<small>DeepSeek 会话日志贡献器</small></div>
+        </div>
+        <p>配合 <code>token-meter</code>（可回放 token 计量）与 <code>session-query</code>（会话检索 / 全文搜索），你可以回答「这轮花了多少 token」「为什么这次请求慢了」「某个工具多久没成功过」这类问题。</p>
+        <div class="box tip">
+          <div class="box-title">🔒 脱敏是默认</div>
+          <p>会话上报有一条 <code>session-telemetry/record</code> 脱敏 waterfall，所有记录在离开进程前都会经过它。默认策略是 <code>FEEDBACK_ONLY</code>——只有你显式给出反馈（点赞/点踩/编辑/撤回）时，才释放到该事件为止的完整规范会话日志前缀。</p>
+        </div>
+
+        <h2>工程约束：为什么这么「卷」</h2>
+        <p>DSH 的 <code>AGENTS.md</code> 与 <code>docs/testing.md</code> 里有一套近乎苛刻的门禁。举几个例子：</p>
+        <div class="kv">
+          <div class="kv-item"><div class="k">strict: true</div><div class="v">所有代码在 <code>strict</code> + <code>noImplicitAny</code> 下编译；每个残留的 <code>any</code> 都要说明为什么无法窄化。</div></div>
+          <div class="kv-item"><div class="k">每文件 100% 覆盖</div><div class="v"><code>test:coverage</code> 是 CI 覆盖门禁（不是 <code>test</code>）：<code>packages/*/*/src</code> 逐文件 100%。</div></div>
+          <div class="kv-item"><div class="k">快照回放</div><div class="v">每个非平凡的模型/用户可见改动，都要更新一个无秘钥的录制会话快照。</div></div>
+          <div class="kv-item"><div class="k">文档同步门禁</div><div class="v"><code>doc-sync</code>：类型等价、链接、字数预算、生成目录的新鲜度，全部机器校验。</div></div>
+          <div class="kv-item"><div class="k">源码面 vs 产物面</div><div class="v">静态门禁走 tsconfig paths 指向 <code>src</code>；消费构建产物 <code>lib/</code> 的门禁必须显式声明依赖。</div></div>
+          <div class="kv-item"><div class="k">双 SDK 投影</div><div class="v">agent-loop / session / SessionEventMap 的改动要同时更新 TypeScript 与 Python SDK 的期望输出。</div></div>
+        </div>
+        <div class="box insight">
+          <div class="box-title">💡 这给我们学习者的启示</div>
+          <p>读 DSH 源码时，你会发现它「写得慢、写得稳」：每个类型都有 JSDoc 契约，每个行为都有测试，每个决策都有 Agent Note 记录「为什么这样、放弃了什么、怎么验证」。<b>这本身就是一份极好的软件工程教材</b>——建议你顺手翻翻 <code>.agents/notes/</code> 里的决策记录，比读代码更能理解设计取舍。</p>
+        </div>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>docs/subsystems/sandbox.zh.md</code> · <code>approval.zh.md</code> · <code>docs/subsystems/otel.zh.md</code> · <code>session-telemetry.zh.md</code> · <code>product-telemetry.zh.md</code></li>
+            <li><code>docs/defensive-patterns/</code> —— 按 artifact 的防御规则清单</li>
+            <li><code>docs/testing.zh.md</code> · <code>docs/development.zh.md</code> —— 构建与门禁</li>
+            <li><code>packages/guard/*</code> · <code>packages/telemetry/*</code> · <code>packages/session/session-telemetry*</code></li>
+          </ul>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">「fail-closed」在审批场景指什么？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>失败时重试三次</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>拿不准/没有应答者时按拒绝处理，绝不默认放行</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>失败时自动切换到 never 策略</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>关闭进程</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>缺失、不负责、抛异常都产生 unavailable，调用方只接受 allowed-once，其余一律拒绝。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">DSH 的 CI 覆盖门禁是哪个命令，要求是什么？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span><code>test</code>，整体 60%</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span><code>test:coverage</code>，<code>packages/*/*/src</code> 逐文件 100%</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span><code>lint</code>，只看格式</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>没有覆盖门禁</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b><code>test:coverage</code> 才是 CI 覆盖门禁（不是 <code>test</code>），要求逐文件 100%。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

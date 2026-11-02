@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 11 章 · 上下文压缩与记忆 · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch11">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 11 章 · 第三部 上下文与记忆</span>
+        <h1>上下文压缩与记忆</h1>
+        <p class="ch-lead">模型的上下文窗口是有限的。一个长任务跑了几十轮、读了上千行文件之后，请求就会「装不下」。DSH 不能简单地丢掉旧消息（那会破坏「日志是真源」），于是它用一套精巧的<b>压缩（compaction）</b>机制：把旧历史总结成摘要，用一条 surface 事件「盖住」它。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会明白</div>
+          <ul>
+            <li>token 计量（tokenMeter）如何为「压力」提供依据；</li>
+            <li>压缩的三个触发入口：pressure、context-overflow、手动 compactNow；</li>
+            <li><code>compaction/start|summary|end</code> 事件与「锁」的作用；</li>
+            <li>工具结果剪枝与图片省略：压缩前的两步「减重」。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：把厚笔记做成摘要卡</div>
+          <p>你的笔记本写满了 200 页，书包快装不下了。你不能撕掉旧页（老师要检查过程），于是你：</p>
+          <ul style="margin:6px 0 0">
+            <li>先把<b>重复的草稿纸</b>（工具结果）挑出来精简一下；</li>
+            <li>再把<b>前面的 150 页</b>浓缩成一张「第 1–150 页摘要卡」，夹在笔记本里；</li>
+            <li>以后复习只看摘要卡 + 最近 50 页；旧页还在，需要时可翻。</li>
+          </ul>
+          <p style="margin-top:8px">这正是 DSH 压缩做的事：<b>先剪枝，再摘要，旧日志不删，只「盖住」。</b></p>
+        </div>
+
+        <h2>先量一量：tokenMeter</h2>
+        <p>压缩的前提是「知道现在有多满」。<code>ctx.tokenMeter</code> 是一个<b>可回放</b>的 token 计量服务：它按路由模型（provider + model）估算每次请求的 token 数，并把已消费的日志修订号一起记下，保证同一份日志每次测量结果一致。压缩的「压力」判断、保留尾部策略、以及摘要范围选择，都依赖它。</p>
+        <div class="box tip">
+          <div class="box-title">💡 为什么要「可回放」？</div>
+          <p>因为压缩决策本身要写进日志（<code>compaction/summary</code> 里带估算 token 数）。如果测量每次不一样，回放就对不上。所以 tokenMeter 必须与日志修订号绑定，做到「同一输入，同一结果」。</p>
+        </div>
+
+        <h2>三个入口，两种触发</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>方法</th><th>触发场景</th><th>说明</th></tr></thead>
+            <tbody>
+              <tr><td><code>compactIfNeeded(agent, trigger, signal)</code></td><td><code>pressure</code>：<code>agent/pre-step</code> 时按已提交请求头判断「快满了」<br><code>context-overflow</code>：<code>agent/request-error</code> 里收到 <code>CONTEXT_WINDOW_EXCEEDED</code></td><td>自动策略的两条路径</td></tr>
+              <tr><td><code>compactNow(agent, signal)</code></td><td>用户手动 <code>/compact</code>，或空闲会话主动缩减</td><td>即使没到压力也做一次有效缩减；无有效范围返回 <code>null</code></td></tr>
+              <tr><td><code>compactRegion(...)</code></td><td>显式指定一个两端都包含的 surface 范围</td><td>区域边界保持「工具调用/结果」配对，但不保持整个轮次</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2>压缩怎么写进日志：三事件 + 一把锁</h2>
+        <div class="diagram">
+          <div class="flow">
+            <div class="node amber">compaction/start<small>获取锁</small></div>
+            <span class="arrow">→</span>
+            <div class="node" style="--nc:var(--brand)">摘要生成<small>ctx.llm.stream()</small></div>
+            <span class="arrow">→</span>
+            <div class="node teal">compaction/summary<small>记录摘要与被遮蔽区间</small></div>
+            <span class="arrow">→</span>
+            <div class="node violet">追加 user/message<small>surfaceOp: replace</small></div>
+            <span class="arrow">→</span>
+            <div class="node green">compaction/end<small>释放锁</small></div>
+          </div>
+          <div class="diagram-caption">锁括住整个操作。中途崩溃会留下「有 start 无 end」的遗留锁，可被检测——而不是一个虚假声称完成的 end。</div>
+        </div>
+        <p>三个事件都<b>仅写入日志</b>（不是 surface 事件）。<code>compaction/summary</code> 记录：安全摘要、被遮蔽的 surface 边界对（<code>start</code>/<code>end</code> seq，是「位置跨度」不是数值区间）、按 surface 顺序排列的被遮蔽 seq、估算 token 数，以及摘要调用的 provider/model/usage。真正进入模型视野的是那条带 <code>surfaceOp: { op:'replace', startSeq, endSeq }</code> 的 <code>user/message</code>。</p>
+
+        <div class="box insight">
+          <div class="box-title">💡 为什么 start/end 是「位置」而不是「数值」？</div>
+          <p>因为一次压缩之后，摘要节点会以一个「新的高 seq」落在「旧区间的位置」上。于是下一轮压缩时，<code>start</code> 完全可能<b>大于</b> <code>end</code>。真正的权威是被遮蔽节点的完整 seq 列表 <code>shadowedSeqs</code>（按 surface 顺序），而不是那个数值区间。</p>
+        </div>
+
+        <h2>动手：看上下文怎么「瘦身」</h2>
+        <div class="diagram" data-widget="compact">
+          <div class="tokgrid">
+            <div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div>
+            <div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div>
+            <div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div>
+            <div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div><div class="tk"></div>
+          </div>
+          <div class="compact-stat small muted" style="margin-top:8px">压缩前：全部历史都在请求里</div>
+          <div style="margin-top:12px">
+            <button class="btn primary" data-act="compact">▶ 执行压缩</button>
+            <button class="btn" data-act="restore">↺ 还原</button>
+          </div>
+          <div class="diagram-caption">每个小方块代表一段上下文。压缩把旧的一大段折叠成一条摘要（青色），只保留最近一小段原文。</div>
+        </div>
+
+        <h2>压缩前的两步「减重」</h2>
+        <p>在真正选择「摘要哪一段」之前，compaction-basic 会先做两件更便宜的事：</p>
+        <div class="two-col">
+          <div class="box tip" style="margin:0">
+            <div class="box-title">✂️ 工具结果剪枝</div>
+            <p class="small">调用可选的 <code>ctx.toolResultPruner</code>，把旧的、冗长的工具结果替换成精简版（<b>单独追加一条新的 tool/result</b> 遮蔽旧的），然后重新测量。很多情况下，光剪枝就够了，根本不用生成摘要。</p>
+          </div>
+          <div class="box warn" style="margin:0">
+            <div class="box-title">🖼️ 图片省略</div>
+            <p class="small">当请求图片超出精确字节预算时，<code>compaction-image-offload</code> 记录一个 <code>image/offload</code> 事件，把最旧的一些图片替换成占位文本，然后重试这一步。</p>
+          </div>
+        </div>
+        <p class="small muted">这就是为什么压缩不一定产生摘要：只要剪枝或图片省略推进了 surface 替换代次，恢复重试就有意义；否则仍以原始请求错误为准。</p>
+
+        <h2>恢复：在「还开着的步骤里」重试</h2>
+        <p>上下文溢出不是「重新开一轮」，而是在失败的步骤关闭后，经 <code>agent/request-error</code> 处理：</p>
+        <ol>
+          <li>若触发条件满足 → 先剪枝，再选摘要；</li>
+          <li>只有剪枝/摘要推进了 surface 替换代次，才返回 <code>{ kind:'retry' }</code>；</li>
+          <li>重试时<b>不重复组装、不重复 pre-step、不重复用户准入</b>，只复用已冻结的渲染组装重新准备调用。</li>
+        </ol>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>docs/subsystems/compaction.zh.md</code> —— 压缩事件、CompactionResult、服务（本章主要依据）</li>
+            <li><code>docs/subsystems/token-meter.zh.md</code> —— 可回放 token 计量</li>
+            <li><code>packages/compaction/*</code> —— compaction / compaction-basic / compaction-tool-result-pruner / compaction-image-offload / command-compact</li>
+            <li><code>docs/agent-lifecycle.zh.md</code> —— 压缩在 pre-step 与 request-error 的位置</li>
+          </ul>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">压缩过程中为什么要用 <code>compaction/start</code> 和 <code>compaction/end</code> 这对事件？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>纯粹为了好看</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>它们是一把「锁」，括住整个操作；中途崩溃会留下可检测的遗留锁，而不是虚假完成</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>它们会直接进入模型历史</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>用来删除旧日志</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>start/summary/end 是仅日志事件。最后释放锁意味着中途崩溃会表现为「有 start 无 end」的遗留锁，可被检测并处理。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">下面哪一步<b>不一定</b>会发生？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>工具结果剪枝</span></button>
+              <button class="quiz-opt"><span class="k">B</span><span>图片省略</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">C</span><span>生成摘要</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>token 重新测量</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：C。</b>剪枝或图片省略往往就够腾出空间了，此时不必生成摘要。是否生成摘要取决于剪枝后是否仍超预算。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

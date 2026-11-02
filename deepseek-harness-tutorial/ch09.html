@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 9 章 · 工具系统（下）· DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch09">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 9 章 · 第二部 核心引擎</span>
+        <h1>工具系统（下）：执行流水线</h1>
+        <p class="ch-lead">模型说「调用 bash 跑 npm test」。从这句话到真正 spawn 一个进程，中间要过八九道关卡：记录、展示、前置钩子、单调守卫、审批、沙箱、执行、文件闸门、后置策略、最终通知。这就是 DSH 的<b>受保护执行流水线</b>——安全与可观测性都藏在这里。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会明白</div>
+          <ul>
+            <li>一次工具调用经过的完整流水线，以及每个 waterfall 能做什么；</li>
+            <li>「单调守卫」和「审批」的区别，为什么审批要 fail-closed；</li>
+            <li>沙箱三种模式，以及 <code>ConfinedArgv</code> 与「命令没跑」vs「命令被拦」的区分；</li>
+            <li>并发分区、有界滚动池、取消与结果归因。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：机场安检 + 海关</div>
+          <p>你想带一件「工具」上飞机：</p>
+          <ul style="margin:6px 0 0">
+            <li><b>先登记</b>（tool/call 先写日志）：哪怕你后来没登机，也知道你带过什么。</li>
+            <li><b>过安检</b>（pre-execute + 守卫）：违禁品直接拦下；有些东西要看情况（单调守卫可 deny 或放行）。</li>
+            <li><b>拿批文</b>（approval）：危险物品要人工签字，没人签就<b>一律拒绝</b>（fail-closed）。</li>
+            <li><b>走海关通道</b>（沙箱）：告诉你只能带进「工作区」这个范围，超出就拦。</li>
+            <li><b>回来后复查</b>（post-execute / finalize）：检查你带回来的东西，必要时替换或加备注。</li>
+          </ul>
+        </div>
+
+        <h2>完整流水线</h2>
+        <p>点「下一步」逐级查看每一道关卡做什么、对应哪个事件。这条路径来自 <code>docs/tool-execution-pipeline.zh.md</code>。</p>
+
+        <div class="stepper" data-widget="stepper">
+          <div class="stepper-head">
+            <span class="st-title">🛡️ 受保护的执行流水线</span>
+            <span class="spacer"></span>
+            <span class="st-index small muted"></span>
+            <div class="step-btns"><button class="btn" data-sact="prev">上一步</button><button class="btn" data-sact="next">下一步</button></div>
+          </div>
+          <div class="stepper-body">
+            <div class="step-track">
+              <div class="step-item" data-title="解析原始批次" data-code="ToolExecutor.execute({ calls, signal, agent, toolSet, log })" data-desc="内置执行器接收模型给出的整批原始调用，负责解析、调度、取消、日志。也可以换成自定义执行器（公开的 ToolExecutor 只要求 describe + execute）。">① 批量解析</div>
+              <div class="step-item" data-title="记录 tool/call + UI 待处理卡" data-code="session.append('tool/call') → presentCall(args)" data-desc="在执行之前先写日志；同时用 presentCall 画一张「进行中」的卡片。事件先落，行为后发。">② 记录 + 展示</div>
+              <div class="step-item" data-title="tools/pre-execute 瀑布" data-code="ctx.on('tools/pre-execute', ...)" data-desc="钩子、权限、沙箱策略在这里介入。可以 allow / deny / ask，也能改写调用。必须调用 next() 才能交给下游。">③ 前置瀑布</div>
+              <div class="step-item" data-title="单调守卫" data-code="guards: deny | abstain（不可重排）" data-desc="已注册的单调守卫只能「拒绝」或「弃权」，不能把已拒绝的改回允许，也不能重排顺序——身份受保护。">④ 守卫</div>
+              <div class="step-item" data-title="ctx.approval 一次性审批" data-code="outcome: allowed-once | rejected | cancelled | unavailable" data-desc="pre-execute 返回 ask 时，向人（或机器应答者）请求一次性授权。缺失、不负责、抛异常都 → unavailable → 调用方一律拒绝。">⑤ 审批</div>
+              <div class="step-item" data-title="tools/execute 环绕分发" data-code="timeout / retry / metrics 包装" data-desc="超时、重试、指标这类「环绕关注点」包装真正的工具体。timeoutMs 就是在这里被强制执行（工具必须协作地转发 signal）。">⑥ 执行包装</div>
+              <div class="step-item" data-title="工具体 + 文件闸门" data-code="execute() → fs/write-intent | fs/edit-intent" data-desc="真正干活。若工具会写/改文件，必须经过 fs 的「先读后编辑」闸门；工具自有事件（todo/write、fs/observed、hook/invoked…）也在这里产生。">⑦ 工具体</div>
+              <div class="step-item" data-title="projectContent + tools/post-execute" data-code="projectContent(...) → post-execute 瀑布" data-desc="先安装执行准备好的内容，再跑后置策略：接受 / 阻断 / 替换 / 追加额外上下文。策略替换拥有最终权威。">⑧ 后置策略</div>
+              <div class="step-item" data-title="规范化 + finalizeContent" data-code="pipeline 异常 → isError；finalizeContent 最后一道内容变换" data-desc="任何阶段抛错都会被规范化成 isError。finalizeContent 是最后一道「仅内容」变换，必须全函数、不得抛错。">⑨ 规范化</div>
+              <div class="step-item" data-title="tools/result 冻结通知 + 记录" data-code="emit('tools/result', frozen) → session.append('tool/result')" data-desc="同步通知监听者一个不可变、可由 JSON 无损表示的结果，随后写入 tool/result。追加的额外上下文在当前批次结果记录之后注入。">⑩ 结果落盘</div>
+              <div class="step-item" data-title="UI 完成卡 + 批次结算" data-code="presentResult(args, result) → 批次 settled" data-desc="用 presentResult 画完成卡。整批 tool/result 都在后，才认为「批次结算」，可以进入下一步。">⑪ 展示 + 结算</div>
+            </div>
+            <div class="step-detail"></div>
+          </div>
+        </div>
+
+        <div class="box insight">
+          <div class="box-title">💡 为什么把「记录」放在「执行」之前？</div>
+          <p>因为 <code>tool/call</code> 一旦写下，即使执行中途进程崩溃，恢复时也能知道「曾计划调用什么、结果缺失」。恢复路径会把缺失的工具结果补成错误（第 12 章）。如果反过来「先执行再记录」，崩溃就会留下一个「做过但没记录」的黑洞——违反「模型可见 ⟺ 已记录」。</p>
+        </div>
+
+        <h2>沙箱：把进程关进「文件效果」的笼子</h2>
+        <p>沙箱只管控一件事：<b>这个进程能写哪些文件</b>。它有三种模式：</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>模式</th><th>允许</th><th>典型场景</th></tr></thead>
+            <tbody>
+              <tr><td><code>read-only</code></td><td>只允许写必要的接收器（如 <code>/dev/null</code>）</td><td>只读分析、评审</td></tr>
+              <tr><td><code>workspace-write</code></td><td>工作区根目录 + 显式额外目录 + 后端承诺的临时区</td><td>正常编码（默认）</td></tr>
+              <tr><td><code>danger-full-access</code></td><td>绕过隔离，直接 spawn 原始 argv</td><td>显式危险操作</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>只有前两种会真正调用 <code>ctx.sandbox.confine(argv, policy, signal)</code>，返回一个 <code>ConfinedArgv</code>：被包装后的 argv、后端达到的强制完整性（<code>full</code>/<code>partial</code>）、以及两种 stderr 分类签名：</p>
+        <div class="two-col">
+          <div class="box tip" style="margin:0">
+            <div class="box-title">🟢 denial signatures</div>
+            <p class="small">沙箱<b>正常工作</b>、把受限命令拦下的特征（bwrap 的 EROFS、Landlock 的 EACCES、Seatbelt 的 EPERM）。</p>
+          </div>
+          <div class="box warn" style="margin:0">
+            <div class="box-title">🔴 runner failure rules</div>
+            <p class="small">沙箱<b>基础设施本身</b>在执行命令前就失败的特征。消费方要先判这个，把它当「沙箱坏了」上报，而不是「任务失败」。</p>
+          </div>
+        </div>
+        <div class="box warn">
+          <div class="box-title">⚠️ fail-closed</div>
+          <p>没有可用后端时，<code>confine()</code> 以 <code>SandboxUnavailableError</code>（<code>SANDBOX_UNAVAILABLE</code>）拒绝。<b>对于受限策略，「静默地不做隔离就透传」永远不合法。</b>这就是「宁可失败，也不偷偷放行」。</p>
+        </div>
+        <p class="small muted">后端：Linux 用 bwrap/Landlock，macOS 用 Seatbelt，Windows 用 ACL 受限令牌。把文件系统与进程提供方一起指向远程 SSH 沙箱，Bash / PTY / LSP 就全都跟着搬过去——这就是第 2 章讲的「能力 seam」的威力。</p>
+
+        <h2>并发：不是所有工具都能一起跑</h2>
+        <p>模型可能一次返回多个工具调用。执行器按 <code>executionMode</code> 给它们分类，进入「有界滚动池」：</p>
+        <div class="diagram">
+          <div class="flow">
+            <div class="node amber">调用 A<small>isConcurrencySafe=true</small></div>
+            <div class="node amber">调用 B<small>true</small></div>
+            <div class="node rose">调用 C<small>false（独占）</small></div>
+            <div class="node teal">调用 D<small>true</small></div>
+          </div>
+          <div class="diagram-caption">A、B 可并行；C 独占，必须等 A、B 停下；D 在 C 之后再并行。<b>只有显式 true 才并行，其余（含抛异常）一律独占。</b>并行的工具不得修改父级状态。</div>
+        </div>
+        <p>顺序仍按「模型给出的顺序」返回结果，即使执行是乱序完成的。取消时，尚未开始的调用会被跳过，结果里也会包含 skipped 标记——绝不静默丢弃。</p>
+
+        <h2>两道「内容改写」钩子，别搞混</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>钩子</th><th>何时</th><th>能做什么</th></tr></thead>
+            <tbody>
+              <tr><td><code>projectContent</code></td><td>执行完成、<b>后置策略之前</b></td><td>安装执行准备好的内容（文本/图片）。策略替换仍拥有最终权威。</td></tr>
+              <tr><td><code>finalizeContent</code></td><td>规范化之后、<b>物质化之前</b>（每个结果恰好一次）</td><td>最后一道「仅内容」不变式；即便绕过了 post-execute 的流水线失败也会调用。必须 total、不得抛错，也不能改 <code>isError</code> 等其它字段。</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>docs/tool-execution-pipeline.zh.md</code> —— 流水线流程图（本章主要依据）</li>
+            <li><code>docs/subsystems/tools.zh.md</code> —— 执行器、ToolExecution、waterfall 类型</li>
+            <li><code>docs/subsystems/sandbox.zh.md</code> —— 沙箱模式、ConfinedArgv、fail-closed</li>
+            <li><code>docs/subsystems/approval.zh.md</code> —— 一次性审批、按会话策略</li>
+            <li><code>packages/core/tools/src/index.ts</code> · <code>packages/sandbox/*</code> · <code>packages/interaction/user-approval</code></li>
+          </ul>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">一个工具调用在流水线中被「拒绝」或「审批被拒」时，它的工具体会怎样？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>仍然执行，只是不记录</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>工具体被跳过，直接走投影/结果路径返回一个（通常是错误）结果</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>整个会话被删除</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>自动改成 danger-full-access 再跑一次</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>denied 分支直接跳过工具体（tool body skipped），进入 project → post → finalize → result，把拒绝作为结果返回给模型。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">为什么沙箱要区分「denial」和「runner failure」两种 stderr 签名？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>为了生成更漂亮的错误颜色</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>denial 表示沙箱正常工作、拦下了命令；runner failure 表示沙箱基础设施在命令运行前就坏了，应作为基础设施故障上报</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>两者没有区别</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>为了决定要不要重试整个模型请求</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>消费方先判 runner failure（命令根本没跑），再判 denial（隔离生效、拦下了）。两者不能混为一谈，否则会把「沙箱坏了」误报成「任务失败」。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

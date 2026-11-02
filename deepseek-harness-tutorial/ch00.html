@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 0 章 · 为什么需要 Harness · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch00">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 0 章 · 第一部 建立直觉</span>
+        <h1>为什么需要 Harness？</h1>
+        <p class="ch-lead">你也许用过 ChatGPT、Claude 或 DeepSeek 的聊天框。它能写诗、能解释代码，但它<b>不会</b>自己去你的电脑上改文件、跑测试、查文档。把「会说话的模型」变成「能干活的智能体」的那层软件，就叫 <b>agent harness</b>。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会明白</div>
+          <ul>
+            <li>大模型本身能做什么、不能做什么；</li>
+            <li>harness（智能体框架）到底是什么，它替模型做了哪 6 件事；</li>
+            <li>Claude Code、Codex、DeepSeek Harness 三者的共性与关键差异；</li>
+            <li>为什么 DeepSeek Harness 值得从头学一遍。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：大脑与身体</div>
+          <p>想象一个特别聪明、但<b>只剩一个大脑泡在玻璃缸里</b>的科学家。他什么都懂，却看不见、拿不动笔、也记不住上一秒想了什么——因为每次问他话，他都会「失忆重启」。</p>
+          <p>你要让他真的帮你做完作业，就得给他装一套 <b>身体</b>：眼睛（读文件）、手（写文件）、腿（跑命令）、记事本（记下做过的事）、还有一位保姆（防止他乱来）。</p>
+          <p><b>大模型 = 玻璃缸里的大脑；harness = 那套身体 + 保姆。</b>Claude Code、Codex、DeepSeek Harness，本质上都是不同厂家造的「身体」。</p>
+        </div>
+
+        <h2>先看清：大模型到底是个什么东西</h2>
+        <p>从工程角度看，一个大语言模型（LLM）就是一个函数：</p>
+        <div class="diagram">
+          <div class="flow">
+            <div class="node">一段文本 <small>（prompt）</small></div>
+            <span class="arrow big">→</span>
+            <div class="node brand" style="--nc:var(--brand)">大模型 <small>预测下一个 token</small></div>
+            <span class="arrow big">→</span>
+            <div class="node teal">下一段文本 <small>（completion）</small></div>
+          </div>
+          <div class="diagram-caption">模型只会「接着往下写」。它没有手、没有硬盘、没有跨请求的记忆。</div>
+        </div>
+        <p>它有三个天生的限制，正好对应 harness 要补的三件事：</p>
+        <div class="mini-cards">
+          <div class="mini-card"><div class="mc-t"><span class="mc-i">🙈</span>看不见世界</div><div class="mc-d">它不知道你磁盘上有什么、测试有没有过、现在是几点。需要 harness 把「世界」塞进它的输入。</div></div>
+          <div class="mini-card"><div class="mc-t"><span class="mc-i">✋</span>动不了手</div><div class="mc-d">它能说「你应该运行 npm test」，但不会真的去跑。需要 harness 把「说」翻译成「做」。</div></div>
+          <div class="mini-card"><div class="mc-t"><span class="mc-i">🧠</span>记不住事</div><div class="mc-d">每次请求都是独立的。需要 harness 保存完整历史，再在每次请求时重新喂给它。</div></div>
+        </div>
+
+        <h2>Harness 到底做了什么：六件事</h2>
+        <p>把任何一个现代 agent harness（无论闭源还是开源）拆开，你几乎都能找到下面六件事。DeepSeek Harness 只是把它们做得特别「模块化」。</p>
+
+        <div class="diagram">
+          <div class="flow-vert" data-widget="playflow">
+            <div class="fv-step play-step">
+              <div class="fv-rail"><div class="fv-dot">1</div><div class="fv-line"></div></div>
+              <div class="fv-body"><div class="fv-t">组装上下文</div><div class="fv-d">把系统提示词、历史消息、当前文件内容、可用工具清单，拼成一次模型请求。<code>system prompt + history + tools</code></div></div>
+            </div>
+            <div class="fv-step play-step">
+              <div class="fv-rail"><div class="fv-dot" style="background:var(--brand-2)">2</div><div class="fv-line"></div></div>
+              <div class="fv-body"><div class="fv-t">调用模型</div><div class="fv-d">把请求发给 LLM，流式接收回复（文字、思考、工具调用）。</div></div>
+            </div>
+            <div class="fv-step play-step">
+              <div class="fv-rail"><div class="fv-dot" style="background:var(--teal)">3</div><div class="fv-line"></div></div>
+              <div class="fv-body"><div class="fv-t">解析工具调用</div><div class="fv-d">模型说「我要调用 read 工具读 a.ts」。harness 把这段结构化 JSON 解析出来。</div></div>
+            </div>
+            <div class="fv-step play-step">
+              <div class="fv-rail"><div class="fv-dot" style="background:var(--teal)">4</div><div class="fv-line"></div></div>
+              <div class="fv-body"><div class="fv-t">执行工具</div><div class="fv-d">真正去读文件、写文件、跑 shell、查网页……再把结果整理成模型能读的内容。</div></div>
+            </div>
+            <div class="fv-step play-step">
+              <div class="fv-rail"><div class="fv-dot" style="background:var(--amber)">5</div><div class="fv-line"></div></div>
+              <div class="fv-body"><div class="fv-t">记录一切</div><div class="fv-d">把用户说了什么、模型回了什么、调了哪些工具、结果如何，全部写进会话日志。</div></div>
+            </div>
+            <div class="fv-step play-step">
+              <div class="fv-rail"><div class="fv-dot" style="background:var(--violet)">6</div><div class="fv-line"></div></div>
+              <div class="fv-body"><div class="fv-t">循环，直到完成</div><div class="fv-d">把工具结果加回上下文，再问模型「下一步？」——如此往复，直到模型不再要工具、任务结束。<b>同时全程有安全护栏。</b></div></div>
+            </div>
+          </div>
+          <div class="diagram-caption">
+            第 1–2 步、第 3–6 步会不断循环，这就是下一章要讲的 <b>Agent 循环</b>。
+            <div style="margin-top:10px"><button class="btn" data-act="pf-play">▶ 播放</button> <button class="btn" data-act="pf-next">下一步</button> <button class="btn" data-act="pf-reset">重置</button></div>
+          </div>
+        </div>
+
+        <div class="box insight">
+          <div class="box-title">💡 一句话记住</div>
+          <p><b>Harness = 上下文工程 + 模型调用 + 工具执行 + 状态记录 + 循环控制 + 安全护栏。</b>模型是「大脑」，这六件事是「身体和神经系统」。谁把这六件事做得更清晰、更可替换、更可回放，谁的 harness 就更好维护。</p>
+        </div>
+
+        <h2>三个真实的 Harness，有什么不同？</h2>
+        <p>你提到的 <b>Claude Code</b>（Anthropic）、<b>Codex</b>（OpenAI）和 <b>DeepSeek Harness</b>（DeepSeek）都属于「命令行的编码智能体」这一类。它们面对的问题几乎一样：读代码、改代码、跑命令、查资料、完成多步任务。差别主要在<b>架构哲学</b>。</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>维度</th><th>Claude Code</th><th>Codex</th><th>DeepSeek Harness (dsh)</th></tr></thead>
+            <tbody>
+              <tr><td>厂商 / 形态</td><td>Anthropic · 终端编码智能体</td><td>OpenAI · 终端 / 云端编码智能体</td><td>DeepSeek · 可嵌入的 agent 框架 + Web/Desktop/CLI</td></tr>
+              <tr><td>核心定位</td><td>一个开箱即用的产品</td><td>一个开箱即用的产品</td><td><b>一个「一切皆插件」的框架</b>，产品只是它的一种装配</td></tr>
+              <tr><td>工具集（典型）</td><td>Read / Edit / Bash / Grep / Glob / Task 子代理 / MCP</td><td>受沙箱的 shell、apply_patch、文件读取、MCP</td><td>fs、bash/pwsh、web、LSP、subagent、workflow、skill、MCP……全部是插件</td></tr>
+              <tr><td>扩展方式</td><td>插件、hooks、skills、MCP</td><td>MCP、AGENTS.md、配置</td><td><b>Cordis 插件</b>：任何能力（含 agent loop 本身）都可替换</td></tr>
+              <tr><td>开源</td><td>客户端部分可见，核心闭源</td><td>CLI 开源，模型闭源</td><td><b>整体 MIT 开源</b>，含完整中文文档</td></tr>
+              <tr><td>模型绑定</td><td>绑定 Claude</td><td>绑定 GPT / Codex 模型</td><td>模型是可插拔适配器（DeepSeek 为主，也可换）</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>有意思的是，DeepSeek Harness 甚至<b>内置了把子任务委派给真实 Claude Code / Codex 会话</b>的能力——仓库里有 <code>subagent-claude-code</code> 和 <code>subagent-codex</code> 两个包。也就是说，它可以「站在别的 harness 肩膀上」干活。此外还有一个 <code>claude-code-mods</code> 兼容层，能加载为 Claude Code 写的 hook 模组。这些设计会在第 13、14 章细讲。</p>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>packages/subagent/subagent-claude-code/README.zh.md</code> —— 委派给原生 Claude Code 会话</li>
+            <li><code>packages/subagent/subagent-codex/README.zh.md</code> —— 委派给原生 Codex 会话</li>
+            <li><code>packages/experimental/claude-code-mods/README.zh.md</code> —— 加载 Claude Code hook 模组的桥接层</li>
+            <li><code>docs/subsystems/claude-code-mods.zh.md</code> —— 与 Claude Code 2.1.287 的逐条行为差异表</li>
+          </ul>
+        </div>
+
+        <h2>为什么值得专门学 DeepSeek Harness？</h2>
+        <p>Claude Code 和 Codex 很好用，但它们是「成品」，你很难看清里面怎么转。DeepSeek Harness 不一样——它从一开始就是奔着<b>可拆解、可替换</b>去设计的：</p>
+        <div class="kv">
+          <div class="kv-item"><div class="k">一切皆插件</div><div class="v">连 Agent 主循环、工具注册表、会话日志都是插件，可以从配置里整体换掉。</div></div>
+          <div class="kv-item"><div class="k">事件溯源</div><div class="v">所有发生过的事都记成一条不可变的日志，模型的「记忆」是从日志里算出来的，可回放、可恢复。</div></div>
+          <div class="kv-item"><div class="k">能力 seam</div><div class="v">「文件系统」「shell」「模型」「子代理」这类能力被抽象成可替换的接口，本地/远程/沙箱版随意切换。</div></div>
+          <div class="kv-item"><div class="k">文档即源码</div><div class="v">仓库自带大量中文架构文档与逐子系统参考，学习者友好。</div></div>
+        </div>
+
+        <div class="box tip">
+          <div class="box-title">🗺️ 接下来的路线</div>
+          <p>这一章我们只建立了「harness 是身体」的直觉。下一章，我们把身体里最核心的那台发动机——<b>Agent 循环</b>——单独拆出来转一圈。你会看到「模型要工具 → 执行工具 → 结果回填 → 再问模型」这个循环，正是所有 harness 的心跳。</p>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">下面哪一项<b>不是</b> harness 的职责？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>把历史消息与工具清单组装成模型请求</span></button>
+              <button class="quiz-opt"><span class="k">B</span><span>真正执行模型要求的「读文件 / 跑命令」</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">C</span><span>在模型内部重新训练神经网络参数</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>把每一步发生了什么记进会话日志</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：C。</b>Harness 是模型外面的「身体」，它从不改模型权重。它负责上下文、调用、工具、记录、循环与安全；训练是另一件完全不同的事。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">Claude Code、Codex、DeepSeek Harness 最本质的共同点是什么？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>都由同一家公司开发</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>都把「只会续写文本的模型」包装成「能调用工具、循环完成任务的智能体」</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>都只支持读写文件，不支持 shell</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>都绑定同一个 DeepSeek 模型</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>它们都是 harness，都在补「看不见、动不了、记不住」这三个短板，只是架构哲学与扩展方式不同。DSH 的特别之处是「一切皆插件 + 开源」。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

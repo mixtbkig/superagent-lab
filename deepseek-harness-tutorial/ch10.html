@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 10 章 · 系统提示词与上下文 · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch10">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 10 章 · 第三部 上下文与记忆</span>
+        <h1>系统提示词与上下文</h1>
+        <p class="ch-lead">模型每次请求都「失忆」，所以 harness 必须在每次请求前，把它该知道的一切重新喂一遍：身份、规则、可用工具、工作区文件、当前时间……这些内容怎么拼、按什么顺序、什么时候刷新，就是本章的主题。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会明白</div>
+          <ul>
+            <li><code>PromptSection</code> / <code>PromptContext</code> / <code>AssembleContext</code> 三者的分工；</li>
+            <li>提示词如何按 order 排序、插值，最终变成 <code>system/message</code>（surface 第 0 号节点）；</li>
+            <li>动态上下文（AGENTS.md、时间、文件引用、skill 目录）如何作为 user-role 快照注入；</li>
+            <li>为什么系统提示词不算「请求字段」，而是「派生历史」。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：开学第一天的资料包</div>
+          <p>新老师每次上课都「不认识这个班」。于是每节课前，班长要递上一叠资料：</p>
+          <ul style="margin:6px 0 0">
+            <li><b>班级公约（系统提示词）</b>：我们是谁、要遵守什么规则、有哪些工具可以用。相对稳定，每节课都递。</li>
+            <li><b>今日课表（动态上下文）</b>：今天几号、天气如何、临时通知。变化时才重新递一份，否则沿用。</li>
+          </ul>
+          <p style="margin-top:8px">DSH 把这两类严格分开：前者是「提示词段落」，后者是「动态上下文」，各自有各自的刷新规则。</p>
+        </div>
+
+        <h2>三样东西</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>概念</th><th>是什么</th><th>关键字段</th></tr></thead>
+            <tbody>
+              <tr><td><code>PromptSection</code></td><td>系统提示词的一段</td><td><code>name</code>、<code>order</code>、<code>text</code>（静态或函数）、<code>interpolate</code>、<code>complete</code></td></tr>
+              <tr><td><code>PromptContext</code></td><td>动态模型上下文，会作为 user-role 快照落盘</td><td><code>name</code>、<code>order</code>、<code>text</code>、<code>interpolate</code>、<code>required</code></td></tr>
+              <tr><td><code>AssembleContext</code></td><td>一次组装的作用域层与控制信号</td><td><code>scope</code>、<code>signal</code>，以及 agent 扩展的 <code>agent</code> / <code>modelSelection</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2>组装过程：从碎片到一段提示词</h2>
+        <div class="diagram">
+          <div class="flow" style="align-items:stretch">
+            <div class="node" style="flex:1">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:4px">很多 PromptSection</div>
+              persona · tools · guidelines · environment …
+            </div>
+            <span class="arrow">→</span>
+            <div class="node amber" style="flex:1">按 <code>order</code> 升序<br><small>同 order 按名称</small></div>
+            <span class="arrow">→</span>
+            <div class="node" style="flex:1">协作式 waterfall<br><small>tools/contexts/vars 就绪</small></div>
+            <span class="arrow">→</span>
+            <div class="node teal" style="flex:1"><code>complete</code> 段？<br><small>有效则成为唯一段</small></div>
+            <span class="arrow">→</span>
+            <div class="node green" style="flex:1"><code>renderPrompt</code><br><small>插值 {{变量}}</small></div>
+          </div>
+          <div class="diagram-caption">最终渲染出的文本，被 agent-loop 作为 <code>system/message</code> 提交——第一个步骤作为 surface 第 0 号节点追加。</div>
+        </div>
+        <p><b>排序规则</b>：段落先按 <code>order</code> 升序，再按名称的代码单元顺序。仓库贡献方通过 <code>getSectionOrder()</code> 解析具名分配，而不是自己乱写数字（比如 <code>TOOL_APPLY_PATCH</code> 是 1350，夹在 <code>TOOL_EDIT</code> 1300 与 <code>TOOL_GLOB</code> 1400 之间）。</p>
+        <p><b>插值</b>：<code>text</code> 里可以写 <code>{{variable}}</code>，默认由 <code>renderPrompt</code> 插值；若 <code>interpolate: false</code> 则原样保留（这对「目录名恰好长得像变量」的情况很重要）。</p>
+        <p><b>complete</b>：如果一个片段声明 <code>complete: true</code>，它会被当作完整提示词——组装仍会跑协作 waterfall（让工具、上下文、变量解析），最后把这个片段恢复成唯一的提示词段落。多个有效的 complete 段会让组装失败。</p>
+
+        <div class="box insight">
+          <div class="box-title">💡 一个反直觉的设计：系统提示词不是「请求字段」</div>
+          <p>在很多 harness 里，system prompt 是请求里的一个 <code>system</code> 字段。但 DSH 把它当作<b>派生历史</b>：渲染后作为 <code>system/message</code> 事件写在 surface 第 0 号节点上。这样：</p>
+          <ul style="margin:6px 0 0">
+            <li>提示词变化 = 追加或替换一个 system 节点，而<b>请求头（request/header）保持不变</b>；</li>
+            <li>回放时从日志就能重建「当时模型到底看到了什么提示词」；</li>
+            <li>压缩可以把旧的系统节点一起处理，而不会破坏「请求是日志的纯函数」。</li>
+          </ul>
+        </div>
+
+        <h2>动态上下文：变化时才刷新</h2>
+        <p><code>PromptContext</code> 是「会变的上下文」，比如当前时间、工作区文件清单、可用技能目录。它不是每步都重发，而是：</p>
+        <ul>
+          <li>组装时解析并排序；</li>
+          <li>agent-loop 只在<b>完整快照发生变化</b>、或被压缩移除时，才把它记录在保留的模型历史之后；</li>
+          <li>记录形式是持久的 <code>user/message</code> 快照（带来源），所以回放时也能重建。</li>
+        </ul>
+        <p>为什么用 user-role 消息而不是系统提示词？因为快照会随会话演进多次出现，塞进 system 字段会污染「请求头」，也会让「请求 = 日志纯函数」失效。作为普通消息，它天然支持追加与遮蔽。</p>
+
+        <h2>上下文家族：谁在往提示词里塞东西</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>包</th><th>注入什么</th></tr></thead>
+            <tbody>
+              <tr><td><code>context/agent-instructions</code></td><td>工作区里的 <code>AGENTS.md</code> / <code>CLAUDE.md</code> 指令文件（含子目录）</td></tr>
+              <tr><td><code>context/time-context</code></td><td>当前时间 / 时区</td></tr>
+              <tr><td><code>context/file-reference</code></td><td>用户用 <code>@文件</code> 引用时，把文件内容或摘要注入</td></tr>
+              <tr><td><code>context/session-reference</code></td><td>跨会话引用（从另一个会话摘录材料）</td></tr>
+              <tr><td><code>context/harness-dev-context</code></td><td>开发 DSH 自身时需要的仓库上下文</td></tr>
+              <tr><td><code>context/tmux-context</code></td><td>tmux 会话状态</td></tr>
+              <tr><td><code>skill/tool-skill</code></td><td>把可用技能的<b>名字 + 描述</b>目录作为 <code>&lt;system-reminder&gt;</code> 注入（第 14 章）</td></tr>
+              <tr><td><code>mcp/mcp-client</code></td><td>把 MCP 服务器的指令作为带归属的作用域章节发布</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>注意 <code>agent-instructions</code> 就是一个很好的例子：它读取工作区的 <code>AGENTS.md</code>，把里面的规则变成模型可见的上下文——你今天读到的很多「工作方式约定」，本身就是通过这条链路进入模型的。</p>
+
+        <h2>消息来源与 ContextForm：语义，不是外观</h2>
+        <p>每条注入的上下文都带一个 <code>MessageSource</code>（谁产生的）和一个可选的 <code>form</code>（这是什么类型的信息）。<code>form</code> 的取值是<b>语义</b>的，不是视觉的：</p>
+        <div class="mini-cards">
+          <div class="mini-card"><div class="mc-t">instructions</div><div class="mc-d">从工作区文件读出的、模型应遵守的指令</div></div>
+          <div class="mini-card"><div class="mc-t">catalog</div><div class="mc-d">本会话可用项目的目录，随变化重新发布</div></div>
+          <div class="mini-card"><div class="mc-t">snapshot</div><div class="mc-d">当前状态；同一生产者的后一份会取代前一份</div></div>
+          <div class="mini-card"><div class="mc-t">notice</div><div class="mc-d">一次性事件通报，不取代任何东西</div></div>
+          <div class="mini-card"><div class="mc-t">relay</div><div class="mc-d">另一个 agent 发来的消息</div></div>
+          <div class="mini-card"><div class="mc-t">recall</div><div class="mc-d">从别的会话日志里摘录的材料</div></div>
+        </div>
+        <p>为什么这么细分？因为 UI 需要知道「这条该画成折叠的指令、还是可刷新的目录、还是一次性通知」。语义归生产者，外观归消费者——这是 DSH 反复出现的分工原则。</p>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>docs/subsystems/system-prompt.zh.md</code> —— PromptSection / PromptContext / AssembleContext（本章主要依据）</li>
+            <li><code>packages/core/system-prompt/src/index.ts</code></li>
+            <li><code>docs/subsystems/llm-streaming.zh.md#content-blocks-and-messages</code> —— <code>ContextForm</code> 与 <code>MessageSourceMap</code></li>
+            <li><code>packages/context/*</code> —— 各个上下文注入包</li>
+          </ul>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">渲染后的系统提示词在 DSH 里以什么形式存在？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>请求里的一个 <code>system</code> 字段</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>一个 <code>system/message</code> 事件，作为 surface 第 0 号节点</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>一个独立的 markdown 文件</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>只能放在第一条 user 消息里</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>系统提示词是派生历史的一部分，以 system/message 事件写在 surface 第 0 号节点，因此提示词变化不会改变 request/header。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">为什么动态上下文（如时间、文件清单）做成 user-role 快照，而不是塞进系统提示词？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>因为 user 消息更长</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>因为它会多次变化，作为普通消息才能追加/被压缩遮蔽，而不污染请求头</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>因为模型只能读 user 消息</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>没有原因，随机选的</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>快照会随会话演进多次出现；作为消息可追加、可被压缩遮蔽，且保持「请求 = 日志的纯函数」。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

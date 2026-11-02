@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 6 章 · 轮次与步骤 · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch06">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 6 章 · 第二部 核心引擎</span>
+        <h1>轮次与步骤：生命周期</h1>
+        <p class="ch-lead">第 1 章给了循环的骨架，第 4 章给了事件的顺序。这一章我们钻进 <code>agent-loop</code> 这个包，看一个 Agent 从「被创建」到「被销毁」的完整生命周期：谁拥有它、谁能拦它、取消到底取消什么、失败怎么重试。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会明白</div>
+          <ul>
+            <li><code>AgentHandle</code>、<code>Agent</code> 接口与 <code>setup</code> 创建窗口；</li>
+            <li><code>send / followup / steer / inject / cancel</code> 分别把消息送到哪里；</li>
+            <li><code>agent/pre-step</code> 的 reject / enter 决策，以及它为什么是唯一的请求推导前钩子；</li>
+            <li>请求失败后 <code>agent/request-error</code> 如何决定重试；</li>
+            <li>取消（cancellation）与中断恢复的精确语义。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：一个学生的「一节课」</div>
+          <p><b>Agent</b> 像一名学生，<b>Turn（轮次）</b>像一节课：上课铃响（turn/start），老师发任务，学生做若干道题（steps），下课铃响（turn/end）。</p>
+          <ul style="margin:6px 0 0">
+            <li><b>setup</b>：学生入学注册（分班、领课本），注册完才正式「出现在名单上」（agent/created）。</li>
+            <li><b>pre-step</b>：每道题发下来前，班长可以先看一眼，决定「这题不做了」（reject）或「换成这两道」（enter）。</li>
+            <li><b>cancel</b>：老师说「停」，学生立刻停下当前动作；停之前已经写进作业本（日志）的，不会擦掉。</li>
+            <li><b>request-error</b>：某题做错了，可以申请「重做一次」，而不是直接判零分。</li>
+          </ul>
+        </div>
+
+        <h2>Agent 的所有权：AgentHandle</h2>
+        <p>创建/恢复一个 agent 时，返回的不是裸的 <code>Agent</code>，而是一个<b>带 disposer 的句柄</b>：</p>
+        <div class="code-file">packages/core/agent/src/index.ts</div>
+<pre data-nohl>interface AgentHandle {
+  agent: Agent
+  dispose(): Promise<void>   // 停止循环、等待退出、注销、移出 store、最后展开作用域世界
+}</pre>
+        <p>这个 disposer 是一个<b>能力（capability）</b>：只有持有它的消费者才能把 agent 拆掉。注意 <code>ctx.agents.get(id)</code> 返回的是<b>裸 <code>Agent</code></b>，拿不到 dispose——这就是「所有权」的体现。配置创建的 agent（循环自己的启动）由循环的 fiber 拥有，连句柄都不需要。</p>
+
+        <div class="box insight">
+          <div class="box-title">💡 两种 Agent 视角</div>
+          <ul style="margin:6px 0 0">
+            <li><b>Agent（句柄）</b>：UI、hook、编排器面向的活动对象，提供 <code>send / inject / steer / cancel / whenIdle</code>。</li>
+            <li><b>AgentHandle（所有权）</b>：谁造的谁持有，负责最终 teardown。</li>
+          </ul>
+          <p style="margin:8px 0 0">它们的共性是：<b>日志才是真源</b>。<code>agent.session</code> 拿到的 Session，就是那份仅追加日志。</p>
+        </div>
+
+        <h2>setup 窗口：注册的黄金时刻</h2>
+        <p>创建 agent 时有一个 <code>setup</code> 回调，它在「Session 已入库、<code>session/created</code> 已发、但 Agent 还没注册、<code>agent/created</code> 还没触发」的窗口里运行：</p>
+        <div class="diagram">
+          <div class="flow">
+            <div class="node ghost">new Session</div>
+            <span class="arrow">→</span>
+            <div class="node">session/created</div>
+            <span class="arrow">→</span>
+            <div class="node amber">setup(agentCtx, agent)<small>可注册专属工具/提示词</small></div>
+            <span class="arrow">→</span>
+            <div class="node">agent/created</div>
+            <span class="arrow">→</span>
+            <div class="node green">首次组装提示词</div>
+          </div>
+          <div class="diagram-caption">在 setup 里通过 <code>agentCtx</code> 注册的东西，会在第一次组装前就存在，且随 agent 销毁一起回收。</div>
+        </div>
+        <p>setup 可以返回一个「发布前一刻」调用的同步 commit；如果 setup 拒绝、commit 抛错、或所有者 dispose，整个事务回滚、Session 被移除——但<b>恢复出来的待处理输入与已存事件会保留</b>。</p>
+
+        <h2>消息怎么进到 Agent 里：四个入口</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>方法</th><th>送到哪</th><th>会不会唤醒 driver</th><th>典型用途</th></tr></thead>
+            <tbody>
+              <tr><td><code>send(msg, target, wakeup)</code></td><td>指定的 inbox 边界</td><td>可控制</td><td>底层统一入口</td></tr>
+              <tr><td><code>followup(msg)</code></td><td>下一轮（next-turn）</td><td>是</td><td>用户正常发消息</td></tr>
+              <tr><td><code>steer(msg)</code></td><td>下一步（next-step）</td><td>是</td><td>运行中插话「顺便也改一下 b.ts」</td></tr>
+              <tr><td><code>inject(msg)</code></td><td>下一次获准的请求</td><td>否</td><td>注入上下文（文件变更通知、skill 目录、定时提醒）</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>核心区别：<b>followup 开新轮次，steer 插进当前轮次的下一步，inject 只挂上下文不唤醒</b>。所有输入都走同一个 inbox；注入的上下文要等一条唤醒消息才真正被处理。</p>
+
+        <h2>pre-step：唯一的请求推导前钩子</h2>
+        <p>在真正组装请求之前，<code>agent/pre-step</code> 瀑布会拿到「本步要进入的完整消息批次」，并返回一个决策：</p>
+<pre data-nohl>type PreStepDecision =
+  | { kind: 'reject' }                                  // 不进入这一步
+  | { kind: 'enter'; messages: UserMessage[]
+      startsRequestSeries?: true }                       // 进入，并给出要追加的消息批次</pre>
+        <ul>
+          <li><b>reject</b>：不打开步骤。若这是本轮的首次领取，则关闭一个「没有步骤」的轮次。</li>
+          <li><b>enter</b>：给出 <code>step/start</code> 后要追加的完整消息批次。决策里<b>省略</b>的已领取消息保持删除状态；领取后新插入的输入留待后续。</li>
+        </ul>
+        <p>它是「请求推导前唯一的 waterfall」——也就是说，这是你最后一次能改变「这一步到底发什么给模型」的机会（除了请求失败后的 <code>agent/request-error</code>）。压缩、技能目录注入、计划模式追加，都挂在这里。</p>
+
+        <h2>失败与重试：request-error</h2>
+        <div class="diagram">
+          <div class="flow">
+            <div class="node rose">模型请求失败<small>写 assistant/attempt</small></div>
+            <span class="arrow">→</span>
+            <div class="node amber">agent/request-error<small>监听器可修复并返回 retry</small></div>
+            <span class="arrow">→</span>
+            <div class="node green">重试：同一已渲染组装<small>不重复 pre-step / 用户准入</small></div>
+          </div>
+          <div class="diagram-caption">默认返回 <code>undefined</code> 就让失败成为终态；返回 <code>{ kind: 'retry' }</code> 且不调用 next() 才接管恢复。</div>
+        </div>
+        <p>重要细节：重试<b>不会</b>重复 pre-step、也不会重复接纳用户消息。它只在「仍打开的步骤内」重新准备调用、复用已冻结的渲染组装。只有剪枝或摘要推进了 surface 替换代次时，重试才有意义；否则仍以原始错误为准。</p>
+
+        <h2>取消与「欠下的工作」</h2>
+        <p><code>cancel(cause, options)</code> 会清空排队与 steering 工作（除非 <code>keepInbox</code>），并中止当前轮次或轮次间任务。规则是：</p>
+        <ul>
+          <li>同一个活动，<b>第一个原因生效</b>；没有活动时取消是 no-op，也不会「武装」后续工作。</li>
+          <li>取消中已经提交到日志的内容<b>不撤销</b>；未派发的工具调用不会出现。</li>
+          <li>如果进程在「结算（settlement）之前」硬中断，会留下一个打开的 <code>turn/start</code> 而无 <code>turn/end</code>——恢复时由 agent-loop 计算出 <code>interruptedTurnClosers</code>（缺失的工具错误、未闭合的 step/end、合成的 <code>turn/end{kind:'interrupted'}</code>）补上（第 12 章）。</li>
+        </ul>
+
+        <h2>一个 Agent 的一生</h2>
+        <div class="stepper" data-widget="stepper">
+          <div class="stepper-head">
+            <span class="st-title">👤 Agent 生命周期</span>
+            <span class="spacer"></span>
+            <span class="st-index small muted"></span>
+            <div class="step-btns"><button class="btn" data-sact="prev">上一步</button><button class="btn" data-sact="next">下一步</button></div>
+          </div>
+          <div class="stepper-body">
+            <div class="step-track">
+              <div class="step-item" data-title="创建 / 恢复" data-code="ctx.agents.create({ sessionId, meta, setup }) / resume(...)" data-desc="在调用方提供的 SessionId 下建全新会话；或先加载持久会话再恢复。返回 AgentHandle。">① 创建 / 恢复</div>
+              <div class="step-item" data-title="setup 注册" data-code="setup(agentCtx, agent) { agentCtx.tools.register(...) }" data-desc="发布前的黄金窗口：注册专属工具、提示词片段、监听器。可返回同步 commit。">② setup</div>
+              <div class="step-item" data-title="agent/created" data-code="agent/created { source: 'startup' | 'resume' | ... }" data-desc="Agent 正式出现在注册表上。等待串行 agent/created 完成后，才开始启动已排队的工作。">③ agent/created</div>
+              <div class="step-item" data-title="轮次循环" data-code="turn/start → [step/start → ... → step/end]* → turn/end" data-desc="每条唤醒消息开一轮；每轮里跑零到多个步骤。平时 status 在 running / idle 之间切换。">④ 轮次循环</div>
+              <div class="step-item" data-title="空闲维护" data-code="agent.runMaintenance(async (signal) => {...})" data-desc="真正的 idle 阶段可以跑一个非轮次维护任务（如压缩、标题生成），期间 status 仍是 idle，新输入留在 inbox。">⑤ 维护任务</div>
+              <div class="step-item" data-title="取消 / 中断" data-code="agent.cancel('user', { keepInbox })" data-desc="停止当前活动。已提交的事实保留；中断的冷日志由恢复路径补齐。">⑥ 取消</div>
+              <div class="step-item" data-title="dispose 销毁" data-code="await handle.dispose()" data-desc="停止循环、等退出、注销 agent、移出 store、展开作用域世界（子 agent 先于父释放）。">⑦ dispose</div>
+            </div>
+            <div class="step-detail"></div>
+          </div>
+        </div>
+
+        <div class="box tip">
+          <div class="box-title">🧩 设计动机</div>
+          <p>为什么把循环放在 <code>agent-loop</code> 这个「可替换的插件」里，而不是写死在核心？因为不同的产品形态（交互式编码、无人值守批处理、子代理、Ralph 循环）可能需要不同的驱动策略。核心只规定 <code>Agent</code> 接口与事件词汇，循环怎么转由插件决定。扩展插件只依赖 <code>agent</code>，绝不直接依赖 <code>agent-loop</code>——所以循环始终保持可替换。</p>
+        </div>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>docs/subsystems/core.zh.md</code> —— Agent 接口、AgentHandle、setup、pre-step、类型模式（本章主要依据）</li>
+            <li><code>docs/agent-lifecycle.zh.md</code> —— 轮次/步骤的 Mermaid 时序图</li>
+            <li><code>packages/core/agent/src/types.ts</code> —— <code>Agent</code> / <code>PreStepDecision</code> / <code>RequestErrorAction</code></li>
+            <li><code>packages/core/agent-loop/README.zh.md</code> —— 循环实现细节（<code>#understand-the-implementation</code>）</li>
+          </ul>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q"><code>steer()</code> 和 <code>followup()</code> 的关键区别是？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>没有区别，只是名字不同</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>steer 插进当前轮次的下一步，followup 开新轮次</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>followup 只能由模型调用</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>steer 会删掉整个会话</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>steer 是「运行中插话」，送到 next-step；followup 是「下一轮再说」，送 next-turn；inject 只挂上下文不唤醒。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">模型请求失败后，默认（监听器什么都不做）会怎样？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>无限重试直到成功</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>失败成为终态，轮次带着错误结束</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>自动切换到另一个模型</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>删除这次 attempt 的日志</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>只有监听器返回 <code>{ kind: 'retry' }</code> 且不调用 next() 才会重试；默认 undefined 保持失败终态。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

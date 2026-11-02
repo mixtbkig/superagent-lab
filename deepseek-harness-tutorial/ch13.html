@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 13 章 · 子代理与多智能体 · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch13">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 13 章 · 第四部 编排与扩展</span>
+        <h1>子代理与多智能体编排</h1>
+        <p class="ch-lead">一个 agent 再强，也有「上下文装不下、任务太多、需要并行」的时候。DSH 的解法是：把工作<b>委派</b>出去。委派可以给一个全新的子 agent（spawn）、一个继承父对话的子 agent（fork）、甚至一个真正的 Claude Code / Codex 会话。再往上，还有 workflow 脚本与 Agent Teams 两种编排层。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会明白</div>
+          <ul>
+            <li>subagent seam：<code>startActivation</code>、能力标记、<code>parent</code> vs <code>caller</code> 交付；</li>
+            <li>spawn / fork / 外部后端（Claude Code、Codex、ACP、SDK）的区别；</li>
+            <li>workflow：模型写的 JS 脚本如何扇出到多个子 agent；</li>
+            <li>Agent Teams：持久 roster、共享任务 DAG、peer 直连消息；</li>
+            <li>lineage（父子关系）为什么只作数据、不影响可见性。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：项目经理与外包团队</div>
+          <p>你是项目经理（主 agent）。手头活太多，你可以：</p>
+          <ul style="margin:6px 0 0">
+            <li><b>spawn（招新人）</b>：招一个全新实习生，只给他任务说明，不知道项目前情。</li>
+            <li><b>fork（复制自己的脑子）</b>：把自己的会议记录复印一份给实习生，让他接着你的思路干——但之后各干各的。</li>
+            <li><b>外包（外部后端）</b>：把活交给隔壁公司的 Claude Code / Codex 团队，他们用自己的流程，只把最终报告交回来。</li>
+            <li><b>workflow（流水线）</b>：写一张「先做 A，再把 A 的结果拆给 B、C 并行」的作业单，让系统自动调度。</li>
+          </ul>
+        </div>
+
+        <h2>subagent seam：一套统一的委派接口</h2>
+        <p>所有后端共用 <code>startActivation</code>。能力标记（<code>SubagentCapabilities</code>）会在启动前校验请求选项：<code>agentOptions</code>、<code>agentPreset</code>、<code>outputSchema</code>、<code>depthLimit</code>。<code>prepareContinuable</code> 选择「本地 Agent 创建」，<code>start</code> 选择「一次外部执行」。</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>概念</th><th>含义</th></tr></thead>
+            <tbody>
+              <tr><td><code>SubagentStartRequest</code></td><td><code>cwd</code>、<code>prompt</code>、<code>parent</code>、<code>signal</code>、可选 <code>agentOptions</code> / <code>outputSchema</code> / <code>maxDepth</code> / <code>agentPreset</code></td></tr>
+              <tr><td><code>delivery: 'parent' | 'caller'</code></td><td>parent：完成后通知模型（注入消息）；caller：只把结果返回给调用方（不打扰父对话）</td></tr>
+              <tr><td><code>SubagentResult</code></td><td>最终文本、可选 <code>structured</code>（按 outputSchema）、诊断、状态</td></tr>
+              <tr><td>continuable</td><td>本地子 agent 拥有持久 Session，最多一个在线 activation；不在线时可冷恢复、发消息继续</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2>五种后端，各有分工</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>提供方</th><th>怎么跑</th><th>何时选它</th></tr></thead>
+            <tbody>
+              <tr><td><code>subagent</code> / <code>spawn-in-process</code></td><td>同进程新建一个全新子 agent（不带父历史）</td><td>任务独立、需要干净上下文</td></tr>
+              <tr><td><code>fork-in-process</code></td><td>从父会话某一点 fork，继承前缀历史</td><td>子任务需要理解父对话上下文</td></tr>
+              <tr><td><code>subagent-claude-code</code></td><td>启动一个真实、无人值守的原生 Claude Code 会话</td><td>需要隔离 + 真实 Claude Code 行为</td></tr>
+              <tr><td><code>subagent-codex</code></td><td>通过官方 app-server 协议跑一个隔离的 Codex 线程</td><td>需要在父工作区里跑真实 Codex</td></tr>
+              <tr><td><code>subagent-dsh-sdk</code> / <code>subagent-acp</code></td><td>进程外 DSH 运行时 / ACP 自动化服务器</td><td>跨进程隔离、自动化流水线</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="box insight">
+          <div class="box-title">💡 关键设计：能力与运行时拆分</div>
+          <p>本地子 agent 在<b>启动时</b>就确定能力（preset、输出 schema、深度上限），<b>运行时</b>再单独管理输入准入、冷恢复、先子后父的释放顺序。activation 结果在资源释放和完成通知<b>之后</b>才结算——所以「拿到结果」意味着「一切都清理干净了」。</p>
+        </div>
+
+        <h2>lineage：父子关系只是「数据」</h2>
+        <p>子 agent 与父 agent 的关系（<code>parentSession</code>、<code>delegationDepth</code>、运行时 <code>subagentDepth</code>）以<b>数据</b>形式携带，<b>从不影响可见性</b>。带作用域的注册不会向下继承给子 agent；子树行为靠 lineage 数据表达，从不靠 scope 结构。这是一个很克制的设计：它让「谁能看到什么」保持扁平、可预测。</p>
+        <div class="diagram">
+          <div class="flow-col" style="gap:12px">
+            <div class="node violet">主 Agent<small>scope A</small></div>
+            <div class="arrow">↓ 委派</div>
+            <div class="flow">
+              <div class="node teal">子 Agent 1<small>scope B · depth 1</small></div>
+              <div class="node teal">子 Agent 2<small>scope C · depth 1</small></div>
+            </div>
+            <div class="arrow">↓ 再委派</div>
+            <div class="node amber">孙 Agent<small>scope D · depth 2</small></div>
+          </div>
+          <div class="diagram-caption">每个 agent 是自己的 scope key；lineage 记录「谁是谁的孩子」，但子 agent 的工具可见性由自己的 scope + restriction 决定，不自动继承父的 scope 注册。</div>
+        </div>
+
+        <h2>workflow：让模型写「编排脚本」</h2>
+        <p>当任务复杂到需要「先 A，再把 A 拆给 B、C 并行，最后汇总」，逐个调用 subagent 工具会很啰嗦。workflow 允许模型写一段 <b>JS 脚本</b>，脚本里调用 <code>agent()</code>、<code>parallel()</code>、<code>pipeline()</code> 等钩子，由引擎在沙箱运行时里执行：</p>
+        <div class="code-file">传给 workflow 引擎的脚本（示意；真实有 meta/args 与结果校验）</div>
+<pre data-nohl>// meta: { name: 'review-fanout', description: '并行审查多个文件' }
+const files = args.files
+const results = await parallel(
+  files.map(f => () => agent({ prompt: `审查 ${f} 并给出问题清单` }))
+)
+return { files, results }</pre>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>概念</th><th>含义</th></tr></thead>
+            <tbody>
+              <tr><td><code>WorkflowStartRequest</code></td><td><code>script</code>（脚本正文）、<code>meta</code>（身份块）、<code>args</code>、<code>parent</code>、可选 <code>subagentProvider</code> / <code>maxTotalAgents</code> / <code>signal</code></td></tr>
+              <tr><td><code>WorkflowMeta</code></td><td>name / description / whenToUse / phases（仅用于进度展示，不暗示执行结构）</td></tr>
+              <tr><td><code>WorkflowResult</code></td><td><code>value</code>（脚本返回值）、<code>stopReason</code>（completed / cancelled / error）、<code>agentsStarted</code></td></tr>
+              <tr><td>fatal 错误</td><td>参数写错、未知选项、超上限等 <code>fatal: true</code> 错误会<b>直接终止脚本</b>，绝不会被 <code>parallel()</code> 悄悄吞成 <code>null</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="box warn">
+          <div class="box-title">⚠️ 失败纪律：拼写错误必须响亮</div>
+          <p>workflow 的一条设计原则：<b>「一个拼错的选项必须明确报错并终止脚本，绝不能消融为看似普通子 agent 失败的结果。」</b>逐项的 <code>null</code> 只留给「子运行失败」和「阶段内普通脚本错误」；钩子误用一律 fatal。</p>
+        </div>
+
+        <h2>Agent Teams：持久团队 + 共享任务</h2>
+        <p>实验性的 <code>ctx.agentTeams</code> 在「可继续 subagent」之上，提供更接近真实团队的协作：</p>
+        <div class="mini-cards">
+          <div class="mini-card"><div class="mc-t"><span class="mc-i">👑</span>隐式 Lead</div><div class="mc-d">根 agent 自动成为队长</div></div>
+          <div class="mini-card"><div class="mc-t"><span class="mc-i">🧑‍🤝‍🧑</span>具名 teammate</div><div class="mc-d">可继续的成员，有稳定身份</div></div>
+          <div class="mini-card"><div class="mc-t"><span class="mc-i">📬</span>peer inbox</div><div class="mc-d">成员之间可直接发消息（不只通过父级）</div></div>
+          <div class="mini-card"><div class="mc-t"><span class="mc-i">🗂️</span>共享任务 DAG</div><div class="mc-d">任务状态在团队内共享，可依赖编排</div></div>
+        </div>
+        <p class="small muted">此外还有一个面向「不可变目标」的 <b>Ralph 循环</b>：前台启动一个全新 agent 反复尝试同一目标，跨轮次靠「共享工作区 + 有界 Ralph 交接」传递状态，而不是继承对话历史。它是由 workflow 与 subagent 原语组合出来的工具策略，不是另一种循环引擎。</p>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>docs/subsystems/subagent.zh.md</code> —— activation、能力、结果与后端约定（680 行）</li>
+            <li><code>docs/subsystems/workflow.zh.md</code> —— WorkflowStartRequest / Meta / Result / 失败纪律</li>
+            <li><code>docs/subsystems/agent-team.zh.md</code> —— Agent Teams 的 roster 与任务 DAG</li>
+            <li><code>packages/subagent/*</code> · <code>packages/workflow/*</code> · <code>packages/experimental/agent-team</code></li>
+          </ul>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">spawn 与 fork 一个子 agent 的关键区别是？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>spawn 用外部进程，fork 用本地</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>fork 继承父会话的历史前缀（seed），spawn 是干净的新上下文</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>fork 只能跑 Claude Code</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>两者完全一样</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>fork 从父会话的某个已提交前缀「播种」子会话；spawn 是全新子 agent，不接收父历史。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">在 workflow 脚本里，一个参数拼错的钩子调用会怎样？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>被静默忽略，当作该子任务失败返回 null</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>抛出 <code>fatal: true</code> 错误，直接终止整个脚本</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>自动换成默认参数重试</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>转交给父 agent 处理</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>钩子误用（错误参数、未知选项、超上限等）是 fatal，组合器会直接重抛，不会消融成普通子 agent 失败。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

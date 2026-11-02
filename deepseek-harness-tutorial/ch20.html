@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 20 章 · 总结与学习路线 · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch20">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 20 章 · 第六部 全景与实战</span>
+        <h1>总结与学习路线</h1>
+        <p class="ch-lead">恭喜你走完了全程。我们把 20 章压缩成一张图、一句话、一份术语表，再给你一条继续深挖的路线。以后忘了某个细节，回到这张图上找位置即可。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 这一章给你</div>
+          <ul>
+            <li>一张「整个 DSH」的全局心智图；</li>
+            <li>一份术语速查表；</li>
+            <li>一条从入门到精通的源码阅读路线；</li>
+            <li>继续学习的资料清单。</li>
+          </ul>
+        </div>
+
+        <h2>一句话总结</h2>
+        <div class="box insight">
+          <div class="box-title">💡 如果只记一句话</div>
+          <p style="font-size:17px;line-height:1.8"><b>DeepSeek Harness 是一台「把模型包成能干活智能体」的机器：它把一切做成可替换的 Cordis 插件，把每一步事实写成可回放的会话日志，用一次「组装上下文 → 调模型 → 执行工具 → 记录结果」的循环驱动，再靠能力 seam 让文件、shell、模型、子代理都能整体替换。</b></p>
+        </div>
+
+        <h2>全局心智图</h2>
+        <div class="diagram">
+          <div class="flow-col" style="gap:14px">
+            <div class="node violet" style="min-width:260px">🌐 界面层 <small>Web · Desktop · CLI · SDK · ACP</small></div>
+            <div class="arrow">⇅ RPC / stdio</div>
+            <div class="node amber" style="min-width:300px">🖥️ Host 进程 <small>webServer · apiGateway · Typert</small></div>
+            <div class="arrow">↓</div>
+            <div class="flow" style="gap:12px">
+              <div class="node" style="--nc:var(--brand)">Agent Loop<small>turn / step</small></div>
+              <div class="node" style="--nc:var(--brand)">Session<small>仅追加日志</small></div>
+              <div class="node" style="--nc:var(--brand)">System Prompt<small>组装</small></div>
+              <div class="node" style="--nc:var(--brand)">Tools<small>注册表+流水线</small></div>
+              <div class="node" style="--nc:var(--brand)">LLM<small>适配器</small></div>
+            </div>
+            <div class="arrow">↓ 能力 seam</div>
+            <div class="flow" style="gap:8px;flex-wrap:wrap">
+              <div class="node teal">fs</div><div class="node teal">shell</div><div class="node teal">subprocess</div><div class="node teal">sandbox</div><div class="node teal">web</div><div class="node teal">lsp</div><div class="node teal">mcp</div><div class="node teal">skill</div><div class="node teal">subagent</div><div class="node teal">workflow</div>
+            </div>
+            <div class="arrow">↓</div>
+            <div class="node" style="min-width:300px;border-style:dashed">🧱 操作系统 / 远程 / 沙箱运行时</div>
+          </div>
+          <div class="diagram-caption">上层可换门店，中层是可替换的六大核心，下层是可替换的能力 seam。每一层都通过事件与日志连在一起。</div>
+        </div>
+
+        <h2>术语速查</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>术语</th><th>一句话</th></tr></thead>
+            <tbody>
+              <tr><td><b>Harness</b></td><td>把模型包成能干活的智能体的软件层（上下文+调用+工具+记录+循环+护栏）</td></tr>
+              <tr><td><b>Cordis / 插件</b></td><td>底层插件框架；一切能力都是插件，注册是可逆副作用</td></tr>
+              <tr><td><b>ctx / Service</b></td><td>服务容器；<code>ctx.tools</code> / <code>ctx.llm</code> / <code>ctx.sessions</code> 等</td></tr>
+              <tr><td><b>seam（能力接缝）</b></td><td>可替换能力 = Service Definition + Provider + Consumer 三件套</td></tr>
+              <tr><td><b>Turn（轮次）</b></td><td>一次「把用户输入干完」的全过程，含零到多个 Step</td></tr>
+              <tr><td><b>Step（步骤）</b></td><td>一次模型请求 + 它引发的工具执行</td></tr>
+              <tr><td><b>Session / 日志</b></td><td>仅追加的 <code>SessionEvent</code> 日志，唯一真源</td></tr>
+              <tr><td><b>surface</b></td><td>产生模型消息的事件子集；历史由它投影而来</td></tr>
+              <tr><td><b>derived history</b></td><td><code>deriveMessages()</code> 从日志算出的 <code>Message[]</code></td></tr>
+              <tr><td><b>waterfall</b></td><td>环绕中间件式事件，必须 <code>next()</code> 才委托下游</td></tr>
+              <tr><td><b>compaction</b></td><td>上下文压缩；追加带 <code>surfaceOp:replace</code> 的摘要消息遮蔽旧区间</td></tr>
+              <tr><td><b>subagent</b></td><td>被委派的子 agent（spawn/fork/外部后端）</td></tr>
+              <tr><td><b>workflow</b></td><td>模型写的 JS 编排脚本，扇出到多个子 agent</td></tr>
+              <tr><td><b>goal</b></td><td>附着在会话上的持久目标，按修订号演进阶段</td></tr>
+              <tr><td><b>profile / bundle / patch</b></td><td>配置档 / 组合包 / 按 id 替换整段 config 的补丁</td></tr>
+              <tr><td><b>fail-closed</b></td><td>拿不准就拒绝（审批、沙箱）</td></tr>
+              <tr><td><b>模型可见 ⟺ 已记录</b></td><td>能进模型的东西必须能从日志重建</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2>源码阅读路线（从易到难）</h2>
+        <div class="stepper" data-widget="stepper">
+          <div class="stepper-head">
+            <span class="st-title">📖 建议的源码阅读顺序</span>
+            <span class="spacer"></span>
+            <span class="st-index small muted"></span>
+            <div class="step-btns"><button class="btn" data-sact="prev">上一步</button><button class="btn" data-sact="next">下一步</button></div>
+          </div>
+          <div class="stepper-body">
+            <div class="step-track">
+              <div class="step-item" data-title="先读文档地图" data-code="docs/architecture.zh.md → docs/cordis-primer.zh.md → docs/glossary.zh.md" data-desc="先把「服务映射、轮次流程、事件域、能力 seam」四件事装进脑子。这三篇加起来才 270 行，性价比极高。">① 文档地图</div>
+              <div class="step-item" data-title="从循环入手" data-code="packages/core/agent-loop/src/ + docs/subsystems/core.zh.md" data-desc="先看 driver 怎么认领输入、开轮次、组装、调模型、派工具、收尾。这是全仓的「主干道」。">② agent-loop</div>
+              <div class="step-item" data-title="再看会话与 LLM" data-code="packages/core/session/src/types.ts + packages/llm/llm/src/types.ts" data-desc="搞清楚 SessionEventMap、deriveMessages、Message/ContentBlock/StreamChunk。它们是循环的两端输入输出。">③ session + llm</div>
+              <div class="step-item" data-title="然后工具流水线" data-code="packages/core/tools/src/index.ts + docs/tool-execution-pipeline.zh.md" data-desc="看一次工具调用怎么过 pre-execute / 守卫 / 审批 / execute / post-execute / finalize。安全与可观测都在这里。">④ tools</div>
+              <div class="step-item" data-title="挑一个 seam 深挖" data-code="packages/fs/* 或 packages/shell/* 或 packages/sandbox/*" data-desc="选一个你感兴趣的 seam，把 Definition / Provider / Consumer 三个角色都读一遍，体会「整体替换」的威力。">⑤ 一个 seam</div>
+              <div class="step-item" data-title="最后读 UI / 传输" data-code="packages/client/* + packages/api/gateway + packages/typert/*" data-desc="如果你想做前端或集成，再进这一层。它很大，但和前五步的耦合很清晰：只消费 session/event。">⑥ 前端 / RPC</div>
+            </div>
+            <div class="step-detail"></div>
+          </div>
+        </div>
+
+        <h2>继续学习的资料</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>资料</th><th>用途</th></tr></thead>
+            <tbody>
+              <tr><td><a href="https://github.com/deepseek-ai/deepseek-harness" target="_blank" rel="noopener">github.com/deepseek-ai/deepseek-harness</a></td><td>仓库本体（README 有中文）</td></tr>
+              <tr><td><code>docs/subsystems/*.zh.md</code></td><td>每个子系统的参考页 + 生成的 Cordis API</td></tr>
+              <tr><td><code>docs/cookbook/*.zh.md</code></td><td>加包、加工具、加 LLM 适配器、加设置页的逐步指南</td></tr>
+              <tr><td><code>docs/tool-catalog.zh.md</code> / <code>config-catalog.zh.md</code> / <code>persistence-catalog.zh.md</code></td><td>三大生成目录：工具 schema、配置字段、持久化事件</td></tr>
+              <tr><td><code>docs/cordis-tutorial/</code></td><td>Cordis 的动手教程</td></tr>
+              <tr><td><code>.agents/notes/</code></td><td>设计决策记录（为什么这样、放弃了什么、怎么验证）</td></tr>
+              <tr><td><code>docs/defensive-patterns/</code></td><td>评审时必须遵守的防御规则</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 最后送你三句话</div>
+          <ol style="margin:6px 0 0">
+            <li><b>先找「它是什么」</b>：任何一个新概念，先在术语表或 <code>docs/subsystems</code> 里定位它是 Service、事件、还是数据结构。</li>
+            <li><b>再问「它挂在哪」</b>：用第 4 章的「归属表」，看它属于哪个 seam / 哪个事件域。</li>
+            <li><b>最后看「它怎么被记录」</b>：凡是影响模型看到的，就去日志里找对应事件——这是 DSH 的万能钥匙。</li>
+          </ol>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 毕业测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">下面哪一组，正确描述了 DSH 的核心不变量？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>一切皆函数、状态存在内存、失败就重试</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>一切皆插件、日志是唯一真源、能力皆可替换（seam）</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>所有工具写死在核心里，模型决定一切</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>会话历史单独存一份，日志只做审计</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>「一切皆插件 + 日志是唯一真源（模型可见⟺已记录）+ 能力 seam 可整体替换」是 DSH 的三大支柱。</div>
+          </div>
+        </div>
+
+        <div class="box tip" style="margin-top:30px">
+          <div class="box-title">🎉 你完成了</div>
+          <p>现在你不仅能读懂 DSH 的源码结构，还能自己挂插件、用 SDK、判断该改哪里。如果这套教程对你有帮助，回到<a href="index.html">课程地图</a>看看进度，把没读完的章节补上。祝你玩得开心！</p>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

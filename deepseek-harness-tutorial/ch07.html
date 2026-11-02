@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 7 章 · LLM 层 · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch07">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 7 章 · 第二部 核心引擎</span>
+        <h1>LLM 层：Message 与流</h1>
+        <p class="ch-lead">模型是唯一真正「不可控」的外部世界。DSH 用一层很薄的抽象把它包起来：上游是一套统一的消息词汇（<code>Message</code> / <code>ContentBlock</code>），下游是每家厂商各不相同的 HTTP/SSE 协议。中间靠一个<b>适配器（adapter）</b> seam 把它们翻译成统一的 <code>StreamChunk</code> 流。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会明白</div>
+          <ul>
+            <li><code>Message</code> 与 <code>ContentBlock</code> 的七种块；</li>
+            <li>原始的 <code>StreamChunk</code> 流式协议（7 种 chunk）；</li>
+            <li>适配器必须遵守的几条铁律（usage 先于 finish、arguments 保持原始 JSON 串…）；</li>
+            <li><code>LlmFailure</code>、重试策略、空响应、上下文溢出分别怎么处理。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：不同国家的厨房，同一张菜单</div>
+          <p>DeepSeek、OpenAI、Anthropic 的「厨房」做菜方式各不相同（HTTP 接口、流式格式都不一样）。但点菜的顾客只认<b>一张统一菜单</b>：一份「消息」由若干「内容块」组成。</p>
+          <p><b>适配器</b>就是翻译官：把统一菜单翻译成某家厨房听得懂的订单，再把厨房边做边上菜的过程（流式 chunk）翻译回统一的「上菜顺序」。这样上层循环根本不需要知道今天用的是哪家厨房。</p>
+        </div>
+
+        <h2>消息 = 内容块数组</h2>
+        <p>一段对话由 <code>Message</code> 组成；一条消息是一个类型化<b>内容块</b>的数组。块的联合类型由 <code>ContentBlockMap</code> 派生，插件可以通过声明合并添加新块：</p>
+        <div class="mini-cards">
+          <div class="mini-card"><div class="mc-t">📝 text</div><div class="mc-d">普通可见文本</div></div>
+          <div class="mini-card"><div class="mc-t">🧠 reasoning</div><div class="mc-d">思考过程（thinking），区别于可见文本</div></div>
+          <div class="mini-card"><div class="mc-t">🖼️ image</div><div class="mc-d">一个持久图片附件</div></div>
+          <div class="mini-card"><div class="mc-t">📄 file</div><div class="mc-d">一个持久文件附件（按路由投影为 handle 文本）</div></div>
+          <div class="mini-card"><div class="mc-t">🔧 tool-call</div><div class="mc-d">id / name / 原始 JSON arguments</div></div>
+          <div class="mini-card"><div class="mc-t">➕ tool-addition</div><div class="mc-d">developer 消息里，激活一个工具定义</div></div>
+          <div class="mini-card"><div class="mc-t">➖ tool-removal</div><div class="mc-d">developer 消息里，移除当前生效的定义</div></div>
+        </div>
+        <p><b>工具结果</b>不是内容块，而是一等的 <code>ToolResultMessage</code>（含 <code>toolCallId</code>、结果 <code>content</code>、可选 <code>isError</code>）。assistant 消息还会在 <code>source</code> 里记录生成它的 provider/model，以及可选的适配器私有回放数据。</p>
+
+        <h2>流式协议：StreamChunk</h2>
+        <p>模型不是一次性吐完整段文本，而是「边想边吐」。适配器把它规范化成一条由 7 种 chunk 构成的流：</p>
+        <div class="code-file">packages/llm/llm/src/types.ts</div>
+<pre data-nohl>type StreamChunk =
+  | { type: 'block-start'; index; blockType }          // 某个块开始了
+  | { type: 'text-delta'; index; text }                // 文本增量
+  | { type: 'reasoning-delta'; index; text }           // 思考增量
+  | { type: 'tool-call-delta'; index; id; name?; argumentsDelta } // 工具参数增量（原始 JSON 串）
+  | { type: 'block-end'; index; block: ContentBlock }  // 块结束，携带完整组装好的块
+  | { type: 'usage'; usage: TokenUsage }               // token 用量（必须在 finish 之前）
+  | { type: 'finish'; reason: FinishReason; replayState? } // 终止，可带回放元数据</pre>
+        <p><code>index</code> 把交错的 delta 关联到所属块；<code>block-end</code> 直接给完整块，消费者不必自己重新拼。这是一个<b>封闭的可辨识联合</b>，<code>switch</code> 以 <code>assertNever</code> 结尾——新增变体会在每个必须处理它的地方触发编译错误。</p>
+
+        <h3>点一下，看流怎么拼起来</h3>
+        <div class="diagram" data-widget="stream">
+          <div style="display:flex;gap:8px;margin-bottom:10px">
+            <button class="btn primary" data-act="run">▶ 播放流</button>
+            <button class="btn" data-act="reset-stream">重置</button>
+          </div>
+          <div class="stream-out">
+<span class="stream-chunk"><span class="ck">block-start</span> index=0 type=text</span>
+<span class="stream-chunk"><span class="cs">text-delta</span> index=0 "我来"</span>
+<span class="stream-chunk"><span class="cs">text-delta</span> index=0 "帮你看一下"</span>
+<span class="stream-chunk"><span class="cs">text-delta</span> index=0 " a.ts。"</span>
+<span class="stream-chunk"><span class="ck">block-end</span> index=0 type=text</span>
+<span class="stream-chunk"><span class="ck">block-start</span> index=1 type=tool-call</span>
+<span class="stream-chunk"><span class="ct">tool-call-delta</span> index=1 id=call_1 name=read {"path"</span>
+<span class="stream-chunk"><span class="ct">tool-call-delta</span> index=1 ":"a.ts"}</span>
+<span class="stream-chunk"><span class="ck">block-end</span> index=1 type=tool-call</span>
+<span class="stream-chunk"><span class="ck">usage</span> { input: 1200, output: 42 }</span>
+<span class="stream-chunk"><span class="ck">finish</span> reason={kind:'tool-calls'}</span>
+          </div>
+          <div class="diagram-caption">一条流可以同时含文本块与工具调用块；<code>usage</code> 一定在 <code>finish</code> 之前，<code>finish</code> 之后不再有任何分片。</div>
+        </div>
+
+        <div class="box insight">
+          <div class="box-title">💡 为什么要这么设计？</div>
+          <p>因为「流」是用户体验的关键（打字机效果、首 token 时间）。如果把流强行攒成完整消息再显示，界面会卡住好几秒。DSH 的策略是：<b>实时侧用瞬态 chunk 推给 UI 做打字机；持久侧把精确时间线压成紧凑 stream 存进日志</b>。两套并存，各取所需。</p>
+        </div>
+
+        <h2>适配器必须遵守的几条铁律</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>规则</th><th>含义</th></tr></thead>
+            <tbody>
+              <tr><td>usage 先于 finish</td><td>把两者都推迟到提供方的结束标记，避免尾部 usage-only 分片破坏顺序。</td></tr>
+              <tr><td>arguments 全程保持原始 JSON 串</td><td>部分片段用 <code>argumentsDelta</code> 流式传输；若提供方给的是对象，在 <code>block-end</code> 重新序列化成字符串。</td></tr>
+              <tr><td>一次适配器调用 = 一次提供方尝试</td><td>适配器<b>禁用库内重试</b>；重试由 agent 层开新轮次负责。</td></tr>
+              <tr><td>空 completion 是可重试错误</td><td>没有任何内容块的终止性 <code>stop</code> 映射为 <code>EMPTY_RESPONSE</code> 错误，默认会重试。</td></tr>
+              <tr><td>上下文溢出只有一个规范 code</td><td>两家 DeepSeek 适配器都暴露 <code>CONTEXT_WINDOW_EXCEEDED</code>，消费方按 code 路由，不依赖文本。</td></tr>
+              <tr><td>回放状态归适配器所有</td><td>成功 finish 可带 <code>ReplayEnvelope</code>；只有同一个适配器实例才拿得到私有回放状态。</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2>失败也要「结构化」：LlmFailure</h2>
+        <p>任何抛出的失败或带内失败，都会被规范化成一个可序列化、与提供方无关的 <code>LlmFailure</code>：<code>message</code>、<code>code</code>、<code>status</code>、<code>providerRetryAfterMs</code>、<code>requestId</code>…… 这样上层可以只在 code 上做决策，而不用解析各家五花八门的错误文本。</p>
+        <div class="two-col">
+          <div class="box warn" style="margin:0">
+            <div class="box-title">🔁 重试策略 <code>ResolvedRetryPolicy</code></div>
+            <p class="small">normal 模式：有限 <code>maxRetries</code> + <code>retryableCodes</code> + 退避（initial/max/jitter）；always 模式：无上限但同样退避。默认不配置时重试 5 次。</p>
+          </div>
+          <div class="box tip" style="margin:0">
+            <div class="box-title">🧮 上下文溢出 → 压缩</div>
+            <p class="small">若失败 code 是 <code>CONTEXT_WINDOW_EXCEEDED</code>，由 compaction 在 <code>agent/request-error</code> 里处理后返回 retry（第 11 章）。</p>
+          </div>
+        </div>
+
+        <h2>谁在提供适配器？</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>包</th><th>说明</th></tr></thead>
+            <tbody>
+              <tr><td><code>packages/llm/llm</code></td><td>Service Definition：<code>ctx.llm</code>，消息/流词汇与适配器 seam（<code>prepareCall / stream</code>）</td></tr>
+              <tr><td><code>packages/llm/llm-deepseek</code></td><td>DeepSeek Messages 适配器（官方）</td></tr>
+              <tr><td><code>packages/llm/llm-pi-ai</code></td><td>基于 pi-ai 的 DeepSeek 适配器（设计验证的孪生实现）</td></tr>
+              <tr><td><code>packages/llm/llm-retry</code></td><td>重试策略插件</td></tr>
+              <tr><td><code>packages/llm/token-meter</code></td><td>可回放的 token 计量（第 11 章）</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>注册适配器就是在 <code>ctx.llm</code> 上挂一个 provider；上层循环通过 <code>ctx.llm.stream()</code> 拿流，中间会经过 <code>llm/stream</code> 瀑布，让插件有机会观察或包装这次调用。</p>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>docs/subsystems/llm-streaming.zh.md</code> —— 完整内容块、StreamChunk、适配器约定（本章主要依据，1290 行）</li>
+            <li><code>packages/llm/llm/src/types.ts</code> —— 消息与流类型</li>
+            <li><code>packages/llm/llm/src/content.ts</code> / <code>message.ts</code> —— 内容块与消息来源</li>
+            <li><code>docs/deepseek-llm-api-wire-extensions.zh.md</code> —— DeepSeek 官方请求扩展</li>
+          </ul>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">在 StreamChunk 协议里，<code>usage</code>（token 用量）必须出现在什么位置？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>流的最开头</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span><code>finish</code> 之前，且 finish 之后不再有任何分片</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>可以在 finish 之后的任意位置</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>它是可选的，位置随意</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>适配器约定：把 usage 和 finish 都推迟到提供方结束标记，保证 usage 永远在 finish 之前、finish 之后没有分片。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">适配器为什么要「禁用库内重试」，把重试交给 agent 层？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>因为重试会花钱</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>这样每次适配器调用就是一次提供方尝试，重试能作为持久、带编号的轮次被记录与回放</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>因为库内重试不被任何模型支持</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>纯属历史遗留</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>把一次适配器调用定义成一次尝试，让重试成为 agent 层的持久事件（assistant/attempt + 新请求），可审计、可回放。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>

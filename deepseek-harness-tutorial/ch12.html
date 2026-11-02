@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 12 章 · 持久化与恢复 · DeepSeek Harness 深度教程</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-chapter="ch12">
+<div class="progress-bar" id="progressBar"></div>
+<header class="topbar">
+  <button class="icon-btn menu-btn" id="menuBtn">☰</button>
+  <div class="brand"><span class="logo">D</span><span>DeepSeek Harness<small>源码深度教程</small></span></div>
+  <span class="spacer"></span>
+  <span class="crumb"></span>
+  <button class="icon-btn" id="themeToggle" title="切换深色/浅色">◐</button>
+</header>
+<div class="scrim" id="scrim"></div>
+<div class="shell">
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="content">
+    <main class="lesson">
+      <article>
+        <span class="ch-tag">第 12 章 · 第三部 上下文与记忆</span>
+        <h1>持久化与恢复</h1>
+        <p class="ch-lead">日志再漂亮，进程一关就没了。怎么把「仅追加日志」安全地落到磁盘？崩在半夜怎么办？模型做了一半、进程被 kill，第二天怎么接着干？这一章讲 DSH 的 <b>持久化 seam</b>：句柄、flush 屏障、崩溃修复，以及让旧日志还能读的格式迁移。</p>
+
+        <div class="objectives">
+          <div class="ob-title">🎯 学完这一章，你会明白</div>
+          <ul>
+            <li><code>SessionPersistence</code> 与 <code>SessionHandle</code>（read/append/flush/close）；</li>
+            <li>「append 不保证落盘，flush 才保证」的语义；</li>
+            <li>崩溃后如何从「有 turn/start 无 turn/end」的日志里恢复；</li>
+            <li>为什么已提交的日志代次<b>永不被移动、覆盖或删除</b>。</li>
+          </ul>
+        </div>
+
+        <div class="box analogy">
+          <div class="box-title">🧸 小学生版：存折与「盖章」</div>
+          <p>你往存折上一笔笔写记录，但写完不等于银行系统已经记账——要柜员<b>盖章（flush）</b>才算真正生效。如果写到一半停电了，最后一行可能只写了一半（「撕裂的尾巴」），银行会把它撕掉，只认完整的记录。</p>
+          <p>更好的比喻是<b>写长篇小说</b>：你一直往后写（append），但只有点了「保存」（flush）才真正存盘；停电后重开，编辑器会告诉你「最后一段损坏，已丢弃」，前面的章回完好。</p>
+        </div>
+
+        <h2>句柄：通往已存会话的唯一通道</h2>
+        <p>持久化 seam 是抽象服务 <code>ctx.sessionPersistence</code>：在现有 <code>SessionEvent</code> 上暴露 <code>create / open / stat / list / export</code>——<b>没有另起一套持久化事件类型</b>。<code>create</code> 和 <code>open</code> 返回一个逐会话的 <code>SessionHandle</code>：</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>方法</th><th>语义</th></tr></thead>
+            <tbody>
+              <tr><td><code>read(offset, length)</code></td><td>读取合法连续逻辑日志的一段；<b>绝不返回撕裂的物理尾巴</b>，同一句柄重复读不会看到更旧的状态</td></tr>
+              <tr><td><code>append(events)</code></td><td>追加连续批次（首个 seq 必须等于已存 next-seq）。<b>resolve 只表示被接受、有序、对本后端可见；不保证崩溃后还在。</b></td></tr>
+              <tr><td><code>flush()</code></td><td>持久性屏障：resolve 后，所有已确认 append 都durable，且会话对其他进程物化可见。<b>这是唯一承诺「能扛住崩溃」的操作。</b></td></tr>
+              <tr><td><code>close()</code></td><td>释放句柄；写句柄会完成待处理持久化并释放写所有权。幂等、不可取消。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="box insight">
+          <div class="box-title">💡 「单写者所有权」</div>
+          <p>句柄是<b>单所有者状态</b>，不是共享服务。已有活跃写持有者时，第二次 <code>open(id,'write')</code> 会以 <code>SessionAlreadyOwnedError</code> 拒绝。所以恢复修复只会在「写所有权之下」发生，绝不会和活跃轮次赛跑。</p>
+        </div>
+
+        <h2>flush 检查点：同步通知，异步落盘</h2>
+        <div class="diagram">
+          <div class="flow">
+            <div class="node" style="--nc:var(--brand)">session/event<small>同步通知</small></div>
+            <span class="arrow">→</span>
+            <div class="node amber">有界 write-behind 窗口<small>批量攒一攒</small></div>
+            <span class="arrow">→</span>
+            <div class="node teal">写句柄 append<small>窗口到期触发</small></div>
+            <span class="arrow">→</span>
+            <div class="node green">session/flush<small>取消等待、排空至停稳</small></div>
+          </div>
+          <div class="diagram-caption">append 不阻塞生产方；loop 用 <code>session/flush</code> 作为「领取下一个普通轮次之前」的顺序与错误观察检查点。</div>
+        </div>
+        <p>后台写被拒时会<b>按序保留</b>对应事件、暂停自动路径、通过 logger 报告；下一次显式 flush 会重试并向调用方响亮地拒绝。<code>session/disposed</code> 会做同样的最终排空并关闭句柄——所以正常关闭不会丢数据。</p>
+
+        <h2>崩溃恢复：把「半个轮次」补完整</h2>
+        <p>假设进程在轮次中途被 kill，磁盘上的日志以「打开的 <code>turn/start</code> 而无 <code>turn/end</code>」结尾。持久化层<b>不会</b>截断或修复它（长任务里单个轮次可能非常庞大，这些事件在崩溃前已持久追加）。它返回物理上有效的连续日志，只丢弃「撕裂尾巴」里不完整的碎片。</p>
+        <p>修复是<b>读方</b>的职责：resume（agent-loop）通过写句柄读取已存日志，计算 <code>interruptedTurnClosers</code>，再作为普通批次追加：</p>
+        <div class="stepper" data-widget="stepper">
+          <div class="stepper-head">
+            <span class="st-title">🔧 崩溃恢复流程</span>
+            <span class="spacer"></span>
+            <span class="st-index small muted"></span>
+            <div class="step-btns"><button class="btn" data-sact="prev">上一步</button><button class="btn" data-sact="next">下一步</button></div>
+          </div>
+          <div class="stepper-body">
+            <div class="step-track">
+              <div class="step-item" data-title="读到半截日志" data-code="... turn/start(turn=5) → step/start → tool/call ... （无 turn/end）" data-desc="磁盘上有一个打开的轮次，没有对应的 turn/end。可能是崩溃、断电、被 kill。">① 发现中断</div>
+              <div class="step-item" data-title="丢弃撕裂尾巴" data-code="read() 只返回合法连续前缀" data-desc="JSONL 后端会部分解码撕裂的 Zstandard 帧；不完整的最后一条被丢弃，完整的记录保留。">② 丢弃碎片</div>
+              <div class="step-item" data-title="计算缺失的闭合事件" data-code="interruptedTurnClosers = { 工具错误?, step/end?, turn/end{kind:'interrupted'} }" data-desc="为每个缺失的工具结果补错误、补未闭合的 step/end、补一个合成的 turn/end（reason.kind = 'interrupted'）。">③ 计算 closers</div>
+              <div class="step-item" data-title="在写所有权下追加" data-code="writeHandle.append(closers)" data-desc="只有持有写句柄（生命周期所有者）才能写；并发 open(write) 会以 SessionAlreadyOwnedError 拒绝，绝不与活跃轮次赛跑。">④ 安全补写</div>
+              <div class="step-item" data-title="发布 Session，继续" data-code="publish(session) → resume 正常循环" data-desc="补齐后的日志是一份完整、可回放的历史；agent 接着往下跑。注意 interrupted 是唯一一个不由循环发出的 TurnEndReason。">⑤ 继续运行</div>
+            </div>
+            <div class="step-detail"></div>
+          </div>
+        </div>
+        <p class="small muted">只读观察方（session-query）只在内存里做同样的配平，<b>不回写任何东西</b>——它没有写所有权。</p>
+
+        <h2>格式演进：旧日志也读得懂</h2>
+        <p>DSH 在快速迭代，日志格式会升级（v0 → v1 → v2 → v3 …）。规则极其保守：</p>
+        <ul>
+          <li>只有「现有判别标签无法阻止不安全解释」时才 bump <code>SESSION_FORMAT_VERSION</code>；</li>
+          <li>已提交的代次路径<b>绝不重命名、替换或删除</b>；</li>
+          <li>每个相邻迁移包只负责一个 <code>vN → vN+1</code> 步骤；</li>
+          <li>写 open 会先编码、校验，再在未改变源的旁边<b>排他发布</b>最终版本命名的后继；</li>
+          <li>拒绝未来版本，而不是猜测着读。</li>
+        </ul>
+        <div class="box warn">
+          <div class="box-title">⚠️ 为什么这么保守？</div>
+          <p>因为会话日志是用户的真实工作记录。一次错误的「迁移」可能永久损坏历史。宁可写一份新代次、保留旧代次，也绝不覆盖。这条原则也解释了为什么有 <code>session-format-v0-to-v1</code>、<code>v1-to-v2</code>、<code>v2-to-v3</code>、<code>v3-to-v4</code> 这样一串「相邻迁移包」，而不是一个大而全的转换器。</p>
+        </div>
+
+        <div class="box source">
+          <div class="box-title">📁 源码坐标</div>
+          <ul style="margin:0">
+            <li><code>docs/subsystems/persistence.zh.md</code> —— SessionHandle、flush、崩溃恢复（本章主要依据，428 行）</li>
+            <li><code>packages/session/session-persistence</code> · <code>session-persistence-jsonl</code></li>
+            <li><code>packages/session/session-format-v0-to-v1</code> … <code>v3-to-v4</code> —— 相邻迁移包</li>
+            <li><code>docs/session-format-status.zh.md</code> —— 版本状态权威</li>
+          </ul>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q"><code>append()</code> 成功返回，是否意味着数据已经能在崩溃后存活？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>是，append 就是落盘</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>不是；只有 <code>flush()</code> resolve 才承诺 durable。append 可能只是被缓冲/批量</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>取决于天气</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>是，但只在 Windows 上</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>append 的 resolve 只表示被接受、有序、对本后端可见；flush 是唯一的持久性屏障。</div>
+          </div>
+        </div>
+
+        <div class="quiz">
+          <div class="quiz-head">🧪 小测验</div>
+          <div class="quiz-body">
+            <div class="quiz-q">崩溃后，谁负责把「半个轮次」补完整？</div>
+            <div class="quiz-opts">
+              <button class="quiz-opt"><span class="k">A</span><span>持久化后端，在 open 时自动截断</span></button>
+              <button class="quiz-opt" data-correct="1"><span class="k">B</span><span>读方（resume/agent-loop）在拿到写句柄后计算并追加 interruptedTurnClosers</span></button>
+              <button class="quiz-opt"><span class="k">C</span><span>谁也不管，让用户重开一个会话</span></button>
+              <button class="quiz-opt"><span class="k">D</span><span>模型自己会发现并修复</span></button>
+            </div>
+            <div class="quiz-exp"><b>答案：B。</b>持久化返回物理有效日志，不截断；修复由读方在写所有权下追加缺失的工具错误、step/end 与合成的 turn/end{interrupted}。</div>
+          </div>
+        </div>
+      </article>
+      <nav class="pager" id="pager"></nav>
+    </main>
+  </div>
+</div>
+<script src="data/packages.js"></script>
+<script src="app.js"></script>
+<script src="diagrams.js"></script>
+</body>
+</html>
